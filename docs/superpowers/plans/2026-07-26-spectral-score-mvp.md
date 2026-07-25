@@ -26,7 +26,7 @@ Create the Vite Vanilla TypeScript project and the complete analysis subsystem.
 - Define shared enums and interfaces for app state, worker messages, analysis errors, analyzed notes, and the compact analysis result.
 - Implement a module Web Worker created with `new Worker(new URL(..., import.meta.url), { type: "module" })`.
 - The worker initializes TFJS WebGL and falls back to CPU, loads `/models/basic-pitch/model.json`, accepts a transferable mono 22,050 Hz `Float32Array`, and reports progress.
-- Accumulate Basic Pitch `frames` and `onsets`, ignore contours, and call `outputToNotesPoly(frames, onsets, 0.25, 0.25, 5)`.
+- Analyze sequential 30-second PCM chunks with a 2-second overlap. Keep only the current chunk's Basic Pitch `frames` and `onsets`, ignore contours, call `outputToNotesPoly(frames, onsets, 0.25, 0.25, 5)`, immediately quantize the chunk's central region into the final activation buffer, and merge overlap notes by pitch and time without duplicates.
 - Preserve start/end frames, convert note timing with `noteFramesToTime`, quantize the 88-bin frame matrix into frame-major `Uint8Array`, and build a monotonic `Float32Array` of frame timestamps using the Basic Pitch timing formula.
 - Return result buffers as transferables. Report user-safe error codes rather than raw exception strings.
 - Implement `AnalysisClient` with job IDs, progress callbacks, stale-message rejection, worker termination, and worker recreation for cancellation.

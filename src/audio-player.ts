@@ -29,6 +29,7 @@ export class AudioPlayer {
   private startedAtContextTime = 0;
   private playing = false;
   private loadToken = 0;
+  private playToken = 0;
 
   public onStateChange: (() => void) | null = null;
 
@@ -53,6 +54,7 @@ export class AudioPlayer {
 
   public async load(file: File): Promise<DecodedAudio> {
     const loadToken = ++this.loadToken;
+    this.playToken += 1;
     if (file.size > MAX_FILE_SIZE_BYTES) {
       throw new AudioPlayerError(AudioPlayerErrorCode.FileTooLarge);
     }
@@ -80,8 +82,18 @@ export class AudioPlayer {
     return { samples, durationSeconds: decodedBuffer.duration };
   }
 
-  public play(): void {
-    if (this.buffer === null) {
+  public async play(): Promise<void> {
+    if (this.buffer === null || this.playing) {
+      return;
+    }
+
+    const playToken = ++this.playToken;
+    await this.context.resume();
+    if (
+      playToken !== this.playToken ||
+      this.buffer === null ||
+      this.playing
+    ) {
       return;
     }
 
@@ -89,11 +101,11 @@ export class AudioPlayer {
       this.offsetSeconds = 0;
     }
 
-    void this.context.resume();
     this.startSource();
   }
 
   public pause(): void {
+    this.playToken += 1;
     if (!this.playing) {
       return;
     }
@@ -104,6 +116,7 @@ export class AudioPlayer {
   }
 
   public seek(seconds: number): void {
+    this.playToken += 1;
     this.offsetSeconds = Math.min(this.durationSeconds, Math.max(0, seconds));
     if (this.playing) {
       this.stopSource();
@@ -116,6 +129,7 @@ export class AudioPlayer {
 
   public reset(): void {
     this.loadToken += 1;
+    this.playToken += 1;
     this.stopSource();
     this.buffer = null;
     this.offsetSeconds = 0;
@@ -124,6 +138,7 @@ export class AudioPlayer {
 
   public dispose(): void {
     this.loadToken += 1;
+    this.playToken += 1;
     this.stopSource();
     void this.context.close();
   }
@@ -154,10 +169,16 @@ export class AudioPlayer {
     source.buffer = this.buffer;
     source.connect(this.context.destination);
     source.onended = () => this.handleEnded(source);
+    try {
+      source.start(0, this.offsetSeconds);
+    } catch (error) {
+      source.onended = null;
+      source.disconnect();
+      throw error;
+    }
     this.source = source;
     this.startedAtContextTime = this.context.currentTime;
     this.playing = true;
-    source.start(0, this.offsetSeconds);
     this.notifyStateChange();
   }
 

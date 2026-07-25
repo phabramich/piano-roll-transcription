@@ -22,24 +22,28 @@ export class AnalysisClientError extends Error {
 }
 
 export class AnalysisClient {
-  private worker: Worker;
+  private worker: Worker | null = null;
   private activeJob: ActiveJob | null = null;
   private nextJobId = 1;
-
-  public constructor() {
-    this.worker = this.createWorker();
-  }
+  private disposed = false;
 
   public analyze(
     samples: Float32Array,
     callbacks: AnalysisCallbacks = {},
   ): Promise<AnalysisResult> {
+    if (this.disposed) {
+      return Promise.reject(
+        new AnalysisClientError(AnalysisErrorCode.WorkerFailed),
+      );
+    }
     if (this.activeJob !== null) {
       this.cancel();
     }
 
     const jobId = this.nextJobId;
     this.nextJobId += 1;
+    const worker = this.worker ?? this.createWorker();
+    this.worker = worker;
 
     return new Promise((resolve, reject) => {
       this.activeJob = { id: jobId, callbacks, resolve, reject };
@@ -48,7 +52,7 @@ export class AnalysisClient {
         jobId,
         samples,
       };
-      this.worker.postMessage(request, [samples.buffer]);
+      worker.postMessage(request, [samples.buffer]);
     });
   }
 
@@ -58,17 +62,19 @@ export class AnalysisClient {
       this.activeJob = null;
     }
 
-    this.worker.terminate();
-    this.worker = this.createWorker();
+    this.worker?.terminate();
+    this.worker = null;
   }
 
   public dispose(): void {
+    this.disposed = true;
     if (this.activeJob !== null) {
       this.activeJob.reject(new AnalysisClientError(AnalysisErrorCode.Cancelled));
       this.activeJob = null;
     }
 
-    this.worker.terminate();
+    this.worker?.terminate();
+    this.worker = null;
   }
 
   private createWorker(): Worker {
@@ -117,16 +123,12 @@ export class AnalysisClient {
     }
 
     const job = this.activeJob;
-
-    if (job === null) {
-      worker.terminate();
-      this.worker = this.createWorker();
-      return;
-    }
-
-    this.activeJob = null;
-    job.reject(new AnalysisClientError(AnalysisErrorCode.WorkerFailed));
     worker.terminate();
-    this.worker = this.createWorker();
+    this.worker = null;
+
+    if (job !== null) {
+      this.activeJob = null;
+      job.reject(new AnalysisClientError(AnalysisErrorCode.WorkerFailed));
+    }
   };
 }

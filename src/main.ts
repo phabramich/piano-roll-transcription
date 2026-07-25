@@ -18,7 +18,8 @@ app.innerHTML = `
       </div>
       <p class="application__privacy">Аудио обрабатывается только на вашем устройстве и никуда не загружается.</p>
     </header>
-    <section class="workspace">
+    <section class="workspace" id="workspace" aria-busy="false">
+      <p class="visually-hidden" id="status" role="status" aria-live="polite"></p>
       <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-controls="file-input">
         <input id="file-input" type="file" accept="audio/*" hidden>
         <span class="drop-zone__icon">♪</span>
@@ -45,6 +46,8 @@ app.innerHTML = `
 `;
 
 const elements = {
+  workspace: requiredElement<HTMLElement>('workspace'),
+  status: requiredElement<HTMLElement>('status'),
   dropZone: requiredElement<HTMLElement>('drop-zone'),
   fileInput: requiredElement<HTMLInputElement>('file-input'),
   dropTitle: requiredElement<HTMLElement>('drop-title'),
@@ -137,7 +140,7 @@ elements.playButton.addEventListener('click', () => {
   if (audioPlayer.isPlaying) {
     audioPlayer.pause();
   } else {
-    audioPlayer.play();
+    void startPlayback();
   }
 });
 
@@ -246,23 +249,58 @@ async function loadFile(file: File): Promise<void> {
   }
 }
 
+async function startPlayback(): Promise<void> {
+  const generation = analysisGeneration;
+  clearError();
+  try {
+    await audioPlayer.play();
+    if (disposed || generation !== analysisGeneration) {
+      return;
+    }
+    updatePlaybackUi();
+    requestAnimation();
+  } catch {
+    if (disposed || generation !== analysisGeneration) {
+      return;
+    }
+    showError(
+      'Не удалось запустить воспроизведение. Проверьте разрешение браузера на звук и попробуйте ещё раз.',
+    );
+    elements.status.textContent = 'Не удалось запустить воспроизведение.';
+    updatePlaybackUi();
+  }
+}
+
 function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
   phase = nextPhase;
+  elements.workspace.setAttribute(
+    'aria-busy',
+    String(
+      phase === AnalysisPhase.Loading ||
+        phase === AnalysisPhase.Analyzing,
+    ),
+  );
   if (phase === AnalysisPhase.Idle) {
     elements.dropTitle.textContent = 'Перетащите аудиофайл сюда';
     elements.dropDescription.textContent = 'или выберите файл с устройства';
+    elements.status.textContent = 'Можно выбрать аудиофайл.';
   } else if (phase === AnalysisPhase.Loading) {
     elements.dropTitle.textContent = 'Декодируем аудио…';
     elements.dropDescription.textContent = 'Подготавливаем дорожку для локального анализа';
+    elements.status.textContent = 'Декодируем аудио.';
   } else if (phase === AnalysisPhase.Analyzing) {
-    elements.dropTitle.textContent = `Анализируем ноты: ${Math.round(progress * 100)}%`;
+    const percentage = Math.round(progress * 100);
+    elements.dropTitle.textContent = `Анализируем ноты: ${percentage}%`;
     elements.dropDescription.textContent = 'Модель работает локально в вашем браузере';
+    elements.status.textContent = `Анализируем ноты: ${percentage}%.`;
   } else if (phase === AnalysisPhase.Complete) {
     elements.dropTitle.textContent = 'Выберите другой аудиофайл';
     elements.dropDescription.textContent = 'Новый файл заменит текущую партитуру';
+    elements.status.textContent = 'Анализ завершён. Партитура готова.';
   } else {
     elements.dropTitle.textContent = 'Не удалось обработать файл';
     elements.dropDescription.textContent = 'Попробуйте выбрать другой аудиофайл';
+    elements.status.textContent = 'Не удалось обработать файл.';
   }
 }
 
