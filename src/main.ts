@@ -1,7 +1,7 @@
 import { AnalysisClient, AnalysisClientError } from './analysis-client';
 import { AnalysisErrorCode, AnalysisPhase } from './analysis-types';
 import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-player';
-import { analyzeFastSpectrum } from './fast-spectrum';
+import { FastSpectrumClient, FastSpectrumClientError } from './fast-spectrum';
 import { PianoRollRenderer } from './piano-roll-renderer';
 import './style.css';
 
@@ -65,6 +65,7 @@ const elements = {
 };
 
 const analysisClient = new AnalysisClient();
+const fastSpectrumClient = new FastSpectrumClient();
 const audioPlayer = new AudioPlayer();
 const renderer = new PianoRollRenderer(elements.canvas);
 let phase = AnalysisPhase.Idle;
@@ -199,6 +200,7 @@ window.addEventListener('beforeunload', () => {
   analysisGeneration += 1;
   cancelAnimation();
   analysisClient.dispose();
+  fastSpectrumClient.dispose();
   audioPlayer.dispose();
   renderer.dispose();
 });
@@ -209,6 +211,7 @@ async function loadFile(file: File): Promise<void> {
   }
   const generation = ++analysisGeneration;
   analysisClient.cancel();
+  fastSpectrumClient.cancel();
   audioPlayer.reset();
   renderer.clear();
   cancelAnimation();
@@ -224,7 +227,7 @@ async function loadFile(file: File): Promise<void> {
     }
 
     setPhase(AnalysisPhase.FastAnalyzing);
-    const fastResult = await analyzeFastSpectrum(decoded.samples);
+    const fastResult = await fastSpectrumClient.analyze(decoded.samples);
     if (generation !== analysisGeneration) {
       return;
     }
@@ -398,6 +401,7 @@ function clearError(): void {
 function isCancelled(error: unknown): boolean {
   return (
     (error instanceof AnalysisClientError && error.code === AnalysisErrorCode.Cancelled) ||
+    (error instanceof FastSpectrumClientError && error.code === AnalysisErrorCode.Cancelled) ||
     (error instanceof AudioPlayerError && error.code === AudioPlayerErrorCode.Cancelled)
   );
 }
