@@ -239,7 +239,10 @@ function clearError(): void {
 }
 
 function isCancelled(error: unknown): boolean {
-  return error instanceof AnalysisClientError && error.code === AnalysisErrorCode.Cancelled;
+  return (
+    (error instanceof AnalysisClientError && error.code === AnalysisErrorCode.Cancelled) ||
+    (error instanceof AudioPlayerError && error.code === AudioPlayerErrorCode.Cancelled)
+  );
 }
 
 function toErrorMessage(error: unknown): string {

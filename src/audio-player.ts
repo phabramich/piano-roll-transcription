@@ -3,6 +3,7 @@ const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 600;
 
 export enum AudioPlayerErrorCode {
+  Cancelled = 'cancelled',
   FileTooLarge = 'file-too-large',
   DurationTooLong = 'duration-too-long',
   InvalidAudio = 'invalid-audio',
@@ -27,6 +28,7 @@ export class AudioPlayer {
   private offsetSeconds = 0;
   private startedAtContextTime = 0;
   private playing = false;
+  private loadToken = 0;
 
   public onStateChange: (() => void) | null = null;
 
@@ -50,6 +52,7 @@ export class AudioPlayer {
   }
 
   public async load(file: File): Promise<DecodedAudio> {
+    const loadToken = ++this.loadToken;
     if (file.size > MAX_FILE_SIZE_BYTES) {
       throw new AudioPlayerError(AudioPlayerErrorCode.FileTooLarge);
     }
@@ -63,13 +66,15 @@ export class AudioPlayer {
       throw new AudioPlayerError(AudioPlayerErrorCode.InvalidAudio);
     }
 
+    this.ensureCurrentLoad(loadToken);
     if (decodedBuffer.duration > MAX_DURATION_SECONDS) {
       throw new AudioPlayerError(AudioPlayerErrorCode.DurationTooLong);
     }
 
+    const samples = await this.downmixAndResample(decodedBuffer);
+    this.ensureCurrentLoad(loadToken);
     this.buffer = decodedBuffer;
     this.offsetSeconds = 0;
-    const samples = await this.downmixAndResample(decodedBuffer);
     this.notifyStateChange();
 
     return { samples, durationSeconds: decodedBuffer.duration };
@@ -110,6 +115,7 @@ export class AudioPlayer {
   }
 
   public reset(): void {
+    this.loadToken += 1;
     this.stopSource();
     this.buffer = null;
     this.offsetSeconds = 0;
@@ -117,6 +123,7 @@ export class AudioPlayer {
   }
 
   public dispose(): void {
+    this.loadToken += 1;
     this.stopSource();
     void this.context.close();
   }
@@ -130,6 +137,12 @@ export class AudioPlayer {
     source.start();
     const rendered = await offlineContext.startRendering();
     return rendered.getChannelData(0).slice();
+  }
+
+  private ensureCurrentLoad(loadToken: number): void {
+    if (loadToken !== this.loadToken) {
+      throw new AudioPlayerError(AudioPlayerErrorCode.Cancelled);
+    }
   }
 
   private startSource(): void {

@@ -1,15 +1,22 @@
-import type { AnalysisResult } from './analysis-types';
+import type { AnalyzedNote, AnalysisResult } from './analysis-types';
 
 const FIRST_MIDI_NOTE = 21;
 const LAST_MIDI_NOTE = 108;
 const PIANO_KEYBOARD_WIDTH = 72;
 const VISIBLE_SECONDS = 12;
 const PLAYHEAD_POSITION = 0.36;
+const NOTES_PER_INDEX_BLOCK = 64;
+
+interface NoteIndexBlock {
+  notes: AnalyzedNote[];
+  maximumEndTimeSeconds: number;
+}
 
 export class PianoRollRenderer {
   private readonly context: CanvasRenderingContext2D;
   private readonly resizeObserver: ResizeObserver;
   private result: AnalysisResult | null = null;
+  private noteIndex: NoteIndexBlock[] = [];
   private durationSeconds = 0;
   private currentTimeSeconds = 0;
 
@@ -30,12 +37,14 @@ export class PianoRollRenderer {
 
   public setAnalysis(result: AnalysisResult, durationSeconds: number): void {
     this.result = result;
+    this.noteIndex = createNoteIndex(result.notes);
     this.durationSeconds = durationSeconds;
     this.render(this.currentTimeSeconds);
   }
 
   public clear(): void {
     this.result = null;
+    this.noteIndex = [];
     this.durationSeconds = 0;
     this.currentTimeSeconds = 0;
     this.render(0);
@@ -182,24 +191,30 @@ export class PianoRollRenderer {
     windowStart: number,
     windowEnd: number,
   ): void {
-    const result = this.result;
-    if (result === null) {
-      return;
-    }
-
     this.context.strokeStyle = 'rgba(139, 202, 255, 0.9)';
     this.context.lineWidth = 1;
-    for (const note of result.notes) {
-      if (note.endTimeSeconds < windowStart || note.startTimeSeconds > windowEnd) {
+    for (const block of this.noteIndex) {
+      if (block.notes[0].startTimeSeconds > windowEnd) {
+        return;
+      }
+      if (block.maximumEndTimeSeconds < windowStart) {
         continue;
       }
-      const row = LAST_MIDI_NOTE - note.pitchMidi;
-      if (row < 0 || row >= 88) {
-        continue;
+      for (const note of block.notes) {
+        if (note.startTimeSeconds > windowEnd) {
+          return;
+        }
+        if (note.endTimeSeconds < windowStart) {
+          continue;
+        }
+        const row = LAST_MIDI_NOTE - note.pitchMidi;
+        if (row < 0 || row >= 88) {
+          continue;
+        }
+        const x = gridLeft + ((note.startTimeSeconds - windowStart) / VISIBLE_SECONDS) * gridWidth;
+        const width = ((note.endTimeSeconds - note.startTimeSeconds) / VISIBLE_SECONDS) * gridWidth;
+        this.context.strokeRect(x, row * rowHeight, Math.max(1, width), rowHeight);
       }
-      const x = gridLeft + ((note.startTimeSeconds - windowStart) / VISIBLE_SECONDS) * gridWidth;
-      const width = ((note.endTimeSeconds - note.startTimeSeconds) / VISIBLE_SECONDS) * gridWidth;
-      this.context.strokeRect(x, row * rowHeight, Math.max(1, width), rowHeight);
     }
   }
 
@@ -261,4 +276,22 @@ function frameDuration(result: AnalysisResult, frame: number): number {
     return result.frameTimestamps[frame + 1] - result.frameTimestamps[frame];
   }
   return 1 / 86;
+}
+
+function createNoteIndex(notes: AnalyzedNote[]): NoteIndexBlock[] {
+  const sortedNotes = [...notes].sort(
+    (left, right) => left.startTimeSeconds - right.startTimeSeconds,
+  );
+  const index: NoteIndexBlock[] = [];
+
+  for (let start = 0; start < sortedNotes.length; start += NOTES_PER_INDEX_BLOCK) {
+    const blockNotes = sortedNotes.slice(start, start + NOTES_PER_INDEX_BLOCK);
+    let maximumEndTimeSeconds = 0;
+    for (const note of blockNotes) {
+      maximumEndTimeSeconds = Math.max(maximumEndTimeSeconds, note.endTimeSeconds);
+    }
+    index.push({ notes: blockNotes, maximumEndTimeSeconds });
+  }
+
+  return index;
 }
