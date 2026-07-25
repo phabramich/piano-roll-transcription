@@ -2,6 +2,7 @@ import { AnalysisErrorCode, type AnalysisResult } from './analysis-types';
 
 export enum FastSpectrumWorkerMessageType {
   Analyze = 'analyze',
+  Preview = 'preview',
   Result = 'result',
   Error = 'error',
 }
@@ -21,6 +22,7 @@ export interface FastSpectrumWorkerResponse {
 
 interface ActiveJob {
   id: number;
+  onPreview: ((result: AnalysisResult) => void) | undefined;
   resolve: (result: AnalysisResult) => void;
   reject: (reason: FastSpectrumClientError) => void;
 }
@@ -32,13 +34,20 @@ export class FastSpectrumClientError extends Error {
   }
 }
 
+export interface FastSpectrumCallbacks {
+  onPreview?: (result: AnalysisResult) => void;
+}
+
 export class FastSpectrumClient {
   private worker: Worker | null = null;
   private activeJob: ActiveJob | null = null;
   private nextJobId = 1;
   private disposed = false;
 
-  public analyze(samples: Float32Array): Promise<AnalysisResult> {
+  public analyze(
+    samples: Float32Array,
+    callbacks: FastSpectrumCallbacks = {},
+  ): Promise<AnalysisResult> {
     if (this.disposed) {
       return Promise.reject(
         new FastSpectrumClientError(AnalysisErrorCode.WorkerFailed),
@@ -53,7 +62,7 @@ export class FastSpectrumClient {
     const workerSamples = samples.slice();
 
     return new Promise((resolve, reject) => {
-      this.activeJob = { id: jobId, resolve, reject };
+      this.activeJob = { id: jobId, onPreview: callbacks.onPreview, resolve, reject };
       const request: FastSpectrumAnalyzeRequest = {
         type: FastSpectrumWorkerMessageType.Analyze,
         jobId,
@@ -102,6 +111,14 @@ export class FastSpectrumClient {
     if (job === null || response.jobId !== job.id) {
       return;
     }
+    if (
+      response.type === FastSpectrumWorkerMessageType.Preview &&
+      response.result !== undefined
+    ) {
+      job.onPreview?.(response.result);
+      return;
+    }
+
     this.activeJob = null;
     worker.terminate();
     this.worker = null;

@@ -219,6 +219,8 @@ async function loadFile(file: File): Promise<void> {
   elements.player.hidden = true;
   clearError();
   setPhase(AnalysisPhase.Loading);
+  let hasFastPreview = false;
+  let hasFullFastSpectrum = false;
 
   try {
     const decoded = await audioPlayer.load(file);
@@ -227,10 +229,27 @@ async function loadFile(file: File): Promise<void> {
     }
 
     setPhase(AnalysisPhase.FastAnalyzing);
-    const fastResult = await fastSpectrumClient.analyze(decoded.samples);
+    const fastResult = await fastSpectrumClient.analyze(decoded.samples, {
+      onPreview: preview => {
+        if (generation !== analysisGeneration) {
+          return;
+        }
+        hasFastPreview = true;
+        renderer.setAnalysis(preview, decoded.durationSeconds);
+        elements.timeline.max = String(decoded.durationSeconds);
+        elements.timeline.value = '0';
+        elements.player.hidden = false;
+        setPhase(AnalysisPhase.FastReady);
+        elements.dropTitle.textContent = 'Предварительный спектр готов';
+        elements.dropDescription.textContent = 'Можно воспроизводить и перематывать, строим полную ленту';
+        elements.status.textContent = 'Предварительный спектр готов. Строим полную ленту.';
+        updatePlaybackUi();
+      },
+    });
     if (generation !== analysisGeneration) {
       return;
     }
+    hasFullFastSpectrum = true;
 
     renderer.setAnalysis(fastResult, decoded.durationSeconds);
     elements.timeline.max = String(decoded.durationSeconds);
@@ -263,9 +282,16 @@ async function loadFile(file: File): Promise<void> {
     if (generation !== analysisGeneration || isCancelled(error)) {
       return;
     }
-    if (isPlaybackReady()) {
+    if (isPlaybackReady() && hasFullFastSpectrum) {
       setPhase(AnalysisPhase.FastReady);
       elements.status.textContent = 'Быстрый спектр готов. Уточнение нот моделью недоступно.';
+      return;
+    }
+    if (isPlaybackReady() && hasFastPreview) {
+      setPhase(AnalysisPhase.FastReady);
+      elements.dropTitle.textContent = 'Предварительный спектр готов';
+      elements.dropDescription.textContent = 'Не удалось построить полную ленту';
+      elements.status.textContent = 'Предварительный спектр готов. Полная лента недоступна.';
       return;
     }
     setPhase(AnalysisPhase.Failed);

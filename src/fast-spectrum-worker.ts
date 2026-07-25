@@ -1,5 +1,5 @@
 import { AnalysisErrorCode, type AnalysisResult } from './analysis-types';
-import { analyzeFastSpectrum } from './fast-spectrum-analysis';
+import { FastSpectrumAnalyzer } from './fast-spectrum-analysis';
 import {
   FastSpectrumWorkerMessageType,
   type FastSpectrumAnalyzeRequest,
@@ -20,8 +20,12 @@ self.addEventListener('message', (event: MessageEvent<FastSpectrumAnalyzeRequest
   }
 
   try {
-    const result = analyzeFastSpectrum(request.samples);
-    postResult(request.jobId, result);
+    const analyzer = new FastSpectrumAnalyzer(request.samples);
+    const previewFrameCount = analyzer.frameCountForSeconds(30);
+    analyzer.analyzeFrames(0, previewFrameCount);
+    postPreview(request.jobId, analyzer.toResult(previewFrameCount));
+    analyzer.analyzeFrames(previewFrameCount, analyzer.frameCount);
+    postResult(request.jobId, analyzer.toResult(analyzer.frameCount));
   } catch {
     postMessageToClient({
       type: FastSpectrumWorkerMessageType.Error,
@@ -35,6 +39,17 @@ function postResult(jobId: number, result: AnalysisResult): void {
   postMessageToClient(
     {
       type: FastSpectrumWorkerMessageType.Result,
+      jobId,
+      result,
+    },
+    [result.frameProbabilities.buffer, result.frameTimestamps.buffer],
+  );
+}
+
+function postPreview(jobId: number, result: AnalysisResult): void {
+  postMessageToClient(
+    {
+      type: FastSpectrumWorkerMessageType.Preview,
       jobId,
       result,
     },
