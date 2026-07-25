@@ -77,8 +77,8 @@ export class AnalysisClient {
       { type: 'module' },
     );
     worker.addEventListener('message', this.handleWorkerMessage);
-    worker.addEventListener('error', this.handleWorkerFailure);
-    worker.addEventListener('messageerror', this.handleWorkerFailure);
+    worker.addEventListener('error', () => this.handleWorkerFailure(worker));
+    worker.addEventListener('messageerror', () => this.handleWorkerFailure(worker));
     return worker;
   }
 
@@ -107,14 +107,22 @@ export class AnalysisClient {
     job.reject(new AnalysisClientError(message.code));
   };
 
-  private readonly handleWorkerFailure = (): void => {
+  private readonly handleWorkerFailure = (worker: Worker): void => {
+    if (worker !== this.worker) {
+      return;
+    }
+
     const job = this.activeJob;
 
     if (job === null) {
+      worker.terminate();
+      this.worker = this.createWorker();
       return;
     }
 
     this.activeJob = null;
     job.reject(new AnalysisClientError(AnalysisErrorCode.WorkerFailed));
+    worker.terminate();
+    this.worker = this.createWorker();
   };
 }
