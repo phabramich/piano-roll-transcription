@@ -76,15 +76,19 @@ export class AnalysisClient {
       new URL('./analysis-worker.ts', import.meta.url),
       { type: 'module' },
     );
-    worker.addEventListener('message', this.handleWorkerMessage);
+    worker.addEventListener('message', event => this.handleWorkerMessage(worker, event));
     worker.addEventListener('error', () => this.handleWorkerFailure(worker));
     worker.addEventListener('messageerror', () => this.handleWorkerFailure(worker));
     return worker;
   }
 
   private readonly handleWorkerMessage = (
+    worker: Worker,
     event: MessageEvent<AnalysisWorkerResponse>,
   ): void => {
+    if (worker !== this.worker) {
+      return;
+    }
     const job = this.activeJob;
     const message = event.data;
 

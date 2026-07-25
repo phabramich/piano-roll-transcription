@@ -36,19 +36,13 @@ function postMessageToClient(
 async function initializeBasicPitch(): Promise<BasicPitch> {
   try {
     const usesWebGl = await tf.setBackend('webgl');
-    if (!usesWebGl) {
-      const usesCpu = await tf.setBackend('cpu');
-      if (!usesCpu) {
-        throw new Error('backend-unavailable');
-      }
+    if (usesWebGl) {
+      await tf.ready();
+    } else {
+      await initializeCpuBackend();
     }
-    await tf.ready();
   } catch {
-    const usesCpu = await tf.setBackend('cpu');
-    if (!usesCpu) {
-      throw new AnalysisWorkerError(AnalysisErrorCode.BackendUnavailable);
-    }
-    await tf.ready();
+    await initializeCpuBackend();
   }
 
   try {
@@ -59,9 +53,24 @@ async function initializeBasicPitch(): Promise<BasicPitch> {
   }
 }
 
+async function initializeCpuBackend(): Promise<void> {
+  try {
+    const usesCpu = await tf.setBackend('cpu');
+    if (!usesCpu) {
+      throw new Error('backend-unavailable');
+    }
+    await tf.ready();
+  } catch {
+    throw new AnalysisWorkerError(AnalysisErrorCode.BackendUnavailable);
+  }
+}
+
 function getBasicPitch(): Promise<BasicPitch> {
   if (basicPitchPromise === null) {
-    basicPitchPromise = initializeBasicPitch();
+    basicPitchPromise = initializeBasicPitch().catch(error => {
+      basicPitchPromise = null;
+      throw error;
+    });
   }
   return basicPitchPromise;
 }

@@ -19,6 +19,7 @@ export class PianoRollRenderer {
   private noteIndex: NoteIndexBlock[] = [];
   private durationSeconds = 0;
   private currentTimeSeconds = 0;
+  private disposed = false;
 
   public onSeek: ((seconds: number) => void) | null = null;
 
@@ -36,6 +37,9 @@ export class PianoRollRenderer {
   }
 
   public setAnalysis(result: AnalysisResult, durationSeconds: number): void {
+    if (this.disposed) {
+      return;
+    }
     this.result = result;
     this.noteIndex = createNoteIndex(result.notes);
     this.durationSeconds = durationSeconds;
@@ -43,6 +47,9 @@ export class PianoRollRenderer {
   }
 
   public clear(): void {
+    if (this.disposed) {
+      return;
+    }
     this.result = null;
     this.noteIndex = [];
     this.durationSeconds = 0;
@@ -51,6 +58,9 @@ export class PianoRollRenderer {
   }
 
   public render(currentTimeSeconds: number): void {
+    if (this.disposed) {
+      return;
+    }
     this.currentTimeSeconds = currentTimeSeconds;
     const { width, height } = this.canvas;
     const ratio = window.devicePixelRatio || 1;
@@ -86,11 +96,15 @@ export class PianoRollRenderer {
   }
 
   public dispose(): void {
+    this.disposed = true;
     this.resizeObserver.disconnect();
     this.canvas.removeEventListener('click', this.handleClick);
   }
 
   private resize(): void {
+    if (this.disposed) {
+      return;
+    }
     const rect = this.canvas.getBoundingClientRect();
     const ratio = window.devicePixelRatio || 1;
     this.canvas.width = Math.max(1, Math.floor(rect.width * ratio));
@@ -103,13 +117,13 @@ export class PianoRollRenderer {
     for (let row = 0; row < 88; row += 1) {
       const midi = LAST_MIDI_NOTE - row;
       const y = row * rowHeight;
-      context.fillStyle = isBlackKey(midi) ? '#182333' : '#e8eef5';
+      context.fillStyle = isBlackKey(midi) ? '#3b362e' : '#fffdf7';
       context.fillRect(0, y, PIANO_KEYBOARD_WIDTH, rowHeight + 0.5);
-      context.strokeStyle = '#405168';
+      context.strokeStyle = '#b7ac9a';
       context.strokeRect(0, y, PIANO_KEYBOARD_WIDTH, rowHeight);
 
       if (midi % 12 === 0 || midi === FIRST_MIDI_NOTE) {
-        context.fillStyle = isBlackKey(midi) ? '#e8eef5' : '#142033';
+        context.fillStyle = isBlackKey(midi) ? '#fffdf7' : '#29251f';
         context.font = '10px Inter, system-ui, sans-serif';
         context.textBaseline = 'middle';
         const label = midi === FIRST_MIDI_NOTE ? 'A0' : `C${Math.floor(midi / 12) - 1}`;
@@ -117,7 +131,7 @@ export class PianoRollRenderer {
       }
     }
 
-    context.strokeStyle = '#52657e';
+    context.strokeStyle = '#8f8474';
     context.strokeRect(0, 0, PIANO_KEYBOARD_WIDTH, height);
   }
 
@@ -129,15 +143,15 @@ export class PianoRollRenderer {
     windowStart: number,
   ): void {
     const context = this.context;
-    context.fillStyle = '#0b1320';
+    context.fillStyle = '#f3efe7';
     context.fillRect(gridLeft, 0, gridWidth, height);
-    context.fillStyle = 'rgba(43, 58, 78, 0.34)';
+    context.fillStyle = 'rgba(153, 140, 119, 0.2)';
     const beforeTrackWidth = Math.max(0, Math.min(gridWidth, ((0 - windowStart) / VISIBLE_SECONDS) * gridWidth));
     const afterTrackX = Math.max(0, Math.min(gridWidth, ((this.durationSeconds - windowStart) / VISIBLE_SECONDS) * gridWidth));
     context.fillRect(gridLeft, 0, beforeTrackWidth, height);
     context.fillRect(gridLeft + afterTrackX, 0, gridWidth - afterTrackX, height);
 
-    context.strokeStyle = 'rgba(110, 135, 165, 0.2)';
+    context.strokeStyle = 'rgba(119, 106, 88, 0.22)';
     context.lineWidth = 1;
     for (let row = 0; row <= 88; row += 1) {
       const y = Math.round(row * rowHeight) + 0.5;
@@ -178,7 +192,7 @@ export class PianoRollRenderer {
           continue;
         }
         const row = result.pitchCount - 1 - pitch;
-        this.context.fillStyle = `rgba(65, 158, 255, ${activation / 255})`;
+        this.context.fillStyle = `rgba(57, 126, 151, ${activation / 255})`;
         this.context.fillRect(x, row * rowHeight, frameWidth, rowHeight);
       }
     }
@@ -191,7 +205,7 @@ export class PianoRollRenderer {
     windowStart: number,
     windowEnd: number,
   ): void {
-    this.context.strokeStyle = 'rgba(139, 202, 255, 0.9)';
+    this.context.strokeStyle = 'rgba(34, 101, 125, 0.9)';
     this.context.lineWidth = 1;
     for (const block of this.noteIndex) {
       if (block.notes[0].startTimeSeconds > windowEnd) {
@@ -235,7 +249,7 @@ export class PianoRollRenderer {
         continue;
       }
       const row = result.pitchCount - 1 - pitch;
-      this.context.fillStyle = 'rgba(65, 158, 255, 0.82)';
+      this.context.fillStyle = 'rgba(57, 126, 151, 0.82)';
       this.context.fillRect(1, row * rowHeight + 1, PIANO_KEYBOARD_WIDTH - 2, Math.max(1, rowHeight - 2));
     }
   }

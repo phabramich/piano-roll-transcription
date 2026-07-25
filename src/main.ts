@@ -18,20 +18,23 @@ app.innerHTML = `
       </div>
       <p class="application__privacy">Аудио обрабатывается только на вашем устройстве и никуда не загружается.</p>
     </header>
-    <section class="workspace" aria-live="polite">
-      <label class="drop-zone" id="drop-zone" for="file-input">
+    <section class="workspace">
+      <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-controls="file-input">
         <input id="file-input" type="file" accept="audio/*" hidden>
         <span class="drop-zone__icon">♪</span>
         <strong id="drop-title">Перетащите аудиофайл сюда</strong>
         <span id="drop-description">или выберите файл с устройства</span>
-      </label>
-      <p class="error-message" id="error-message" hidden></p>
+      </div>
+      <div class="error-message" id="error-message" role="alert" hidden>
+        <span id="error-text"></span>
+        <button class="button button--secondary" id="recovery-button" type="button">Выбрать другой файл</button>
+      </div>
       <section class="player" id="player" hidden>
         <div class="player__topline">
           <strong id="file-name"></strong>
           <span id="time-label">0:00 / 0:00</span>
         </div>
-        <canvas id="piano-roll" aria-label="Спектральная партитура"></canvas>
+        <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Стрелки перемещают позицию на пять секунд."></canvas>
         <div class="player__controls">
           <button class="button" id="play-button" type="button">Воспроизвести</button>
           <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
@@ -47,6 +50,8 @@ const elements = {
   dropTitle: requiredElement<HTMLElement>('drop-title'),
   dropDescription: requiredElement<HTMLElement>('drop-description'),
   errorMessage: requiredElement<HTMLElement>('error-message'),
+  errorText: requiredElement<HTMLElement>('error-text'),
+  recoveryButton: requiredElement<HTMLButtonElement>('recovery-button'),
   player: requiredElement<HTMLElement>('player'),
   fileName: requiredElement<HTMLElement>('file-name'),
   canvas: requiredElement<HTMLCanvasElement>('piano-roll'),
@@ -62,13 +67,20 @@ let phase = AnalysisPhase.Idle;
 let analysisGeneration = 0;
 let animationFrameId: number | null = null;
 let scrubbing = false;
+let disposed = false;
 
 audioPlayer.onStateChange = () => {
+  if (disposed) {
+    return;
+  }
   updatePlaybackUi();
   requestAnimation();
 };
 
 renderer.onSeek = seconds => {
+  if (disposed || phase !== AnalysisPhase.Complete) {
+    return;
+  }
   audioPlayer.seek(seconds);
   updatePlaybackUi();
   requestAnimation();
@@ -76,19 +88,42 @@ renderer.onSeek = seconds => {
 
 elements.fileInput.addEventListener('change', () => {
   const [file] = elements.fileInput.files ?? [];
+  elements.fileInput.value = '';
   if (file !== undefined) {
     void loadFile(file);
   }
 });
 
+elements.dropZone.addEventListener('click', () => {
+  if (!disposed) {
+    elements.fileInput.click();
+  }
+});
+elements.dropZone.addEventListener('keydown', event => {
+  if (disposed) {
+    return;
+  }
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    elements.fileInput.click();
+  }
+});
 elements.dropZone.addEventListener('dragover', event => {
+  if (disposed) {
+    return;
+  }
   event.preventDefault();
   elements.dropZone.classList.add('drop-zone--dragging');
 });
-elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('drop-zone--dragging'));
+elements.dropZone.addEventListener('dragleave', () => {
+  elements.dropZone.classList.remove('drop-zone--dragging');
+});
 elements.dropZone.addEventListener('drop', event => {
   event.preventDefault();
   elements.dropZone.classList.remove('drop-zone--dragging');
+  if (disposed) {
+    return;
+  }
   const [file] = event.dataTransfer?.files ?? [];
   if (file !== undefined) {
     void loadFile(file);
@@ -96,6 +131,9 @@ elements.dropZone.addEventListener('drop', event => {
 });
 
 elements.playButton.addEventListener('click', () => {
+  if (disposed || phase !== AnalysisPhase.Complete) {
+    return;
+  }
   if (audioPlayer.isPlaying) {
     audioPlayer.pause();
   } else {
@@ -104,10 +142,16 @@ elements.playButton.addEventListener('click', () => {
 });
 
 elements.timeline.addEventListener('pointerdown', () => {
+  if (disposed || phase !== AnalysisPhase.Complete) {
+    return;
+  }
   scrubbing = true;
   requestAnimation();
 });
 elements.timeline.addEventListener('input', () => {
+  if (disposed || phase !== AnalysisPhase.Complete) {
+    return;
+  }
   audioPlayer.seek(Number(elements.timeline.value));
   updatePlaybackUi();
   requestAnimation();
@@ -119,13 +163,46 @@ for (const eventName of ['pointerup', 'pointercancel', 'change']) {
   });
 }
 
+elements.canvas.addEventListener('keydown', event => {
+  if (disposed || phase !== AnalysisPhase.Complete) {
+    return;
+  }
+  const seekOffset = event.key === 'ArrowLeft' ? -5 : event.key === 'ArrowRight' ? 5 : null;
+  if (seekOffset !== null) {
+    event.preventDefault();
+    audioPlayer.seek(audioPlayer.currentTimeSeconds + seekOffset);
+  } else if (event.key === 'Home') {
+    event.preventDefault();
+    audioPlayer.seek(0);
+  } else if (event.key === 'End') {
+    event.preventDefault();
+    audioPlayer.seek(audioPlayer.durationSeconds);
+  } else {
+    return;
+  }
+  updatePlaybackUi();
+  requestAnimation();
+});
+
+elements.recoveryButton.addEventListener('click', () => {
+  if (!disposed) {
+    elements.fileInput.click();
+  }
+});
+
 window.addEventListener('beforeunload', () => {
+  disposed = true;
+  analysisGeneration += 1;
+  cancelAnimation();
   analysisClient.dispose();
   audioPlayer.dispose();
   renderer.dispose();
 });
 
 async function loadFile(file: File): Promise<void> {
+  if (disposed) {
+    return;
+  }
   const generation = ++analysisGeneration;
   analysisClient.cancel();
   audioPlayer.reset();
@@ -204,11 +281,15 @@ function requestAnimation(): void {
   if (animationFrameId !== null || (!audioPlayer.isPlaying && !scrubbing)) {
     return;
   }
-  animationFrameId = requestAnimationFrame(animate);
+  const generation = analysisGeneration;
+  animationFrameId = requestAnimationFrame(() => animate(generation));
 }
 
-function animate(): void {
+function animate(generation: number): void {
   animationFrameId = null;
+  if (disposed || generation !== analysisGeneration) {
+    return;
+  }
   updatePlaybackUi();
   if (audioPlayer.isPlaying || scrubbing) {
     requestAnimation();
@@ -229,13 +310,13 @@ function cancelAnimation(): void {
 }
 
 function showError(message: string): void {
-  elements.errorMessage.textContent = message;
+  elements.errorText.textContent = message;
   elements.errorMessage.hidden = false;
 }
 
 function clearError(): void {
   elements.errorMessage.hidden = true;
-  elements.errorMessage.textContent = '';
+  elements.errorText.textContent = '';
 }
 
 function isCancelled(error: unknown): boolean {
@@ -253,10 +334,22 @@ function toErrorMessage(error: unknown): string {
     if (error.code === AudioPlayerErrorCode.DurationTooLong) {
       return 'Длительность записи больше 10 минут. Выберите более короткий файл.';
     }
-    return 'Этот файл не удалось декодировать как аудио.';
+    return 'Формат не поддерживается или аудиофайл повреждён.';
   }
   if (error instanceof AnalysisClientError) {
-    return 'Анализ не завершился. Попробуйте выбрать файл ещё раз.';
+    if (error.code === AnalysisErrorCode.ModelLoadFailed) {
+      return 'Не удалось загрузить локальную модель анализа.';
+    }
+    if (error.code === AnalysisErrorCode.BackendUnavailable) {
+      return 'Браузер не смог запустить вычислительный модуль.';
+    }
+    if (error.code === AnalysisErrorCode.WorkerFailed) {
+      return 'Рабочий процесс анализа остановился.';
+    }
+    if (error.code === AnalysisErrorCode.InvalidAudio) {
+      return 'Аудиоданные пусты или не подходят для анализа.';
+    }
+    return 'Анализ аудио не завершился.';
   }
   return 'Произошла непредвиденная ошибка. Попробуйте ещё раз.';
 }
