@@ -1,0 +1,21 @@
+{
+  "name": "spectral-score",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@spotify/basic-pitch": "1.0.1",
+    "@tensorflow/tfjs": "3.21.0",
+    "@tensorflow/tfjs-backend-cpu": "3.21.0",
+    "@tensorflow/tfjs-backend-webgl": "3.21.0"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "vite": "6.3.5"
+  }
+}
