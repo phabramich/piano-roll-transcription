@@ -30,6 +30,7 @@ export class AudioPlayer {
   private playing = false;
   private loadToken = 0;
   private playToken = 0;
+  private disposed = false;
 
   public onStateChange: (() => void) | null = null;
 
@@ -137,10 +138,14 @@ export class AudioPlayer {
   }
 
   public dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
     this.loadToken += 1;
     this.playToken += 1;
     this.stopSource();
-    void this.context.close();
+    void this.context.close().catch(() => undefined);
   }
 
   private async downmixAndResample(buffer: AudioBuffer): Promise<Float32Array> {
