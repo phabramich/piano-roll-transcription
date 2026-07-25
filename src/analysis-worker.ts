@@ -1,7 +1,6 @@
 import { BasicPitch, noteFramesToTime, outputToNotesPoly } from '@spotify/basic-pitch';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-cpu';
-import '@tensorflow/tfjs-backend-webgl';
 
 import {
   AnalysisErrorCode,
@@ -48,20 +47,13 @@ function postMessageToClient(
 
 async function initializeBasicPitch(): Promise<BasicPitch> {
   try {
-    const usesWebGl = await tf.setBackend('webgl');
-    if (usesWebGl) {
-      await tf.ready();
-    } else {
-      await initializeCpuBackend();
-    }
-  } catch {
     await initializeCpuBackend();
-  }
-
-  try {
     const model = await tf.loadGraphModel(MODEL_URL);
     return new BasicPitch(Promise.resolve(model));
   } catch {
+    if (tf.getBackend() !== 'cpu') {
+      throw new AnalysisWorkerError(AnalysisErrorCode.BackendUnavailable);
+    }
     throw new AnalysisWorkerError(AnalysisErrorCode.ModelLoadFailed);
   }
 }

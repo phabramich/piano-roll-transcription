@@ -1,7 +1,9 @@
 export enum AnalysisPhase {
   Idle = 'idle',
   Loading = 'loading',
-  Analyzing = 'analyzing',
+  FastAnalyzing = 'fast-analyzing',
+  FastReady = 'fast-ready',
+  Refining = 'refining',
   Complete = 'complete',
   Failed = 'failed',
 }

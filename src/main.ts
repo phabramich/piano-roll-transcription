@@ -1,6 +1,7 @@
 import { AnalysisClient, AnalysisClientError } from './analysis-client';
 import { AnalysisErrorCode, AnalysisPhase } from './analysis-types';
 import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-player';
+import { analyzeFastSpectrum } from './fast-spectrum';
 import { PianoRollRenderer } from './piano-roll-renderer';
 import './style.css';
 
@@ -81,7 +82,7 @@ audioPlayer.onStateChange = () => {
 };
 
 renderer.onSeek = seconds => {
-  if (disposed || phase !== AnalysisPhase.Complete) {
+  if (disposed || !isPlaybackReady()) {
     return;
   }
   audioPlayer.seek(seconds);
@@ -134,7 +135,7 @@ elements.dropZone.addEventListener('drop', event => {
 });
 
 elements.playButton.addEventListener('click', () => {
-  if (disposed || phase !== AnalysisPhase.Complete) {
+  if (disposed || !isPlaybackReady()) {
     return;
   }
   if (audioPlayer.isPlaying) {
@@ -145,14 +146,14 @@ elements.playButton.addEventListener('click', () => {
 });
 
 elements.timeline.addEventListener('pointerdown', () => {
-  if (disposed || phase !== AnalysisPhase.Complete) {
+  if (disposed || !isPlaybackReady()) {
     return;
   }
   scrubbing = true;
   requestAnimation();
 });
 elements.timeline.addEventListener('input', () => {
-  if (disposed || phase !== AnalysisPhase.Complete) {
+  if (disposed || !isPlaybackReady()) {
     return;
   }
   audioPlayer.seek(Number(elements.timeline.value));
@@ -167,7 +168,7 @@ for (const eventName of ['pointerup', 'pointercancel', 'change']) {
 }
 
 elements.canvas.addEventListener('keydown', event => {
-  if (disposed || phase !== AnalysisPhase.Complete) {
+  if (disposed || !isPlaybackReady()) {
     return;
   }
   const seekOffset = event.key === 'ArrowLeft' ? -5 : event.key === 'ArrowRight' ? 5 : null;
@@ -222,11 +223,29 @@ async function loadFile(file: File): Promise<void> {
       return;
     }
 
-    setPhase(AnalysisPhase.Analyzing, 0);
+    setPhase(AnalysisPhase.FastAnalyzing);
+    const fastResult = await analyzeFastSpectrum(decoded.samples);
+    if (generation !== analysisGeneration) {
+      return;
+    }
+
+    renderer.setAnalysis(fastResult, decoded.durationSeconds);
+    elements.timeline.max = String(decoded.durationSeconds);
+    elements.timeline.value = '0';
+    elements.player.hidden = false;
+    setPhase(AnalysisPhase.FastReady);
+    updatePlaybackUi();
+
+    await yieldToBrowser();
+    if (generation !== analysisGeneration) {
+      return;
+    }
+
+    setPhase(AnalysisPhase.Refining, 0);
     const result = await analysisClient.analyze(decoded.samples, {
       onProgress: progress => {
         if (generation === analysisGeneration) {
-          setPhase(AnalysisPhase.Analyzing, progress);
+          setPhase(AnalysisPhase.Refining, progress);
         }
       },
     });
@@ -235,13 +254,15 @@ async function loadFile(file: File): Promise<void> {
     }
 
     renderer.setAnalysis(result, decoded.durationSeconds);
-    elements.timeline.max = String(decoded.durationSeconds);
-    elements.timeline.value = '0';
-    elements.player.hidden = false;
     setPhase(AnalysisPhase.Complete);
     updatePlaybackUi();
   } catch (error) {
     if (generation !== analysisGeneration || isCancelled(error)) {
+      return;
+    }
+    if (isPlaybackReady()) {
+      setPhase(AnalysisPhase.FastReady);
+      elements.status.textContent = 'Быстрый спектр готов. Уточнение нот моделью недоступно.';
       return;
     }
     setPhase(AnalysisPhase.Failed);
@@ -277,7 +298,8 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     'aria-busy',
     String(
       phase === AnalysisPhase.Loading ||
-        phase === AnalysisPhase.Analyzing,
+      phase === AnalysisPhase.FastAnalyzing ||
+      phase === AnalysisPhase.Refining,
     ),
   );
   if (phase === AnalysisPhase.Idle) {
@@ -288,11 +310,19 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     elements.dropTitle.textContent = 'Декодируем аудио…';
     elements.dropDescription.textContent = 'Подготавливаем дорожку для локального анализа';
     elements.status.textContent = 'Декодируем аудио.';
-  } else if (phase === AnalysisPhase.Analyzing) {
+  } else if (phase === AnalysisPhase.FastAnalyzing) {
+    elements.dropTitle.textContent = 'Строим быстрый спектр…';
+    elements.dropDescription.textContent = 'Сопоставляем частоты с 88 клавишами пианино';
+    elements.status.textContent = 'Строим быстрый спектр.';
+  } else if (phase === AnalysisPhase.FastReady) {
+    elements.dropTitle.textContent = 'Быстрый спектр готов';
+    elements.dropDescription.textContent = 'Воспроизведение доступно, уточняем ноты в фоне';
+    elements.status.textContent = 'Быстрый спектр готов. Можно воспроизводить и перематывать.';
+  } else if (phase === AnalysisPhase.Refining) {
     const percentage = Math.round(progress * 100);
-    elements.dropTitle.textContent = `Анализируем ноты: ${percentage}%`;
-    elements.dropDescription.textContent = 'Модель работает локально в вашем браузере';
-    elements.status.textContent = `Анализируем ноты: ${percentage}%.`;
+    elements.dropTitle.textContent = `Уточняем ноты моделью: ${percentage}%`;
+    elements.dropDescription.textContent = 'Быстрый спектр уже доступен для воспроизведения';
+    elements.status.textContent = `Быстрый спектр готов. Уточняем ноты моделью: ${percentage}%.`;
   } else if (phase === AnalysisPhase.Complete) {
     elements.dropTitle.textContent = 'Выберите другой аудиофайл';
     elements.dropDescription.textContent = 'Новый файл заменит текущую партитуру';
@@ -305,7 +335,7 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
 }
 
 function updatePlaybackUi(): void {
-  if (phase !== AnalysisPhase.Complete) {
+  if (!isPlaybackReady()) {
     return;
   }
   const currentTime = audioPlayer.currentTimeSeconds;
@@ -313,6 +343,14 @@ function updatePlaybackUi(): void {
   elements.timeline.value = String(currentTime);
   elements.timeLabel.textContent = `${formatTime(currentTime)} / ${formatTime(audioPlayer.durationSeconds)}`;
   renderer.render(currentTime);
+}
+
+function isPlaybackReady(): boolean {
+  return (
+    phase === AnalysisPhase.FastReady ||
+    phase === AnalysisPhase.Refining ||
+    phase === AnalysisPhase.Complete
+  );
 }
 
 function requestAnimation(): void {
@@ -395,6 +433,10 @@ function toErrorMessage(error: unknown): string {
 function formatTime(seconds: number): string {
   const safeSeconds = Math.max(0, Math.floor(seconds));
   return `${Math.floor(safeSeconds / 60)}:${String(safeSeconds % 60).padStart(2, '0')}`;
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, 0));
 }
 
 function requiredElement<ElementType extends HTMLElement>(id: string): ElementType {
