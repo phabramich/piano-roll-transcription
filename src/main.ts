@@ -335,7 +335,7 @@ async function refineWithModel(): Promise<void> {
   clearError();
   setPhase(AnalysisPhase.Refining, 0);
   try {
-    const result = await analysisClient.analyze(samples, {
+    const result = await analysisClient.analyze(samples.slice(), {
       onProgress: progress => {
         if (generation === analysisGeneration) {
           setPhase(AnalysisPhase.Refining, progress);
@@ -387,6 +387,7 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     String(
       phase === AnalysisPhase.Loading ||
       phase === AnalysisPhase.FastAnalyzing ||
+      phase === AnalysisPhase.PreviewReady ||
       phase === AnalysisPhase.Refining,
     ),
   );
