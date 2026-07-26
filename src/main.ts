@@ -24,9 +24,13 @@ app.innerHTML = `
       <p class="visually-hidden" id="status" role="status" aria-live="polite"></p>
       <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-controls="file-input">
         <input id="file-input" type="file" accept="audio/*" hidden>
-        <span class="drop-zone__icon">♪</span>
-        <strong id="drop-title">Перетащите аудиофайл сюда</strong>
-        <span id="drop-description">или выберите файл с устройства</span>
+        <span class="drop-zone__icon" aria-hidden="true">
+          <svg viewBox="0 0 56 56" fill="none"><path d="M9 30.5h6l4.5-12 8 25 6.5-19 4.5 10H47" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="28" cy="28" r="25" stroke="currentColor" stroke-width="1.5" opacity=".25"/></svg>
+        </span>
+        <strong id="drop-title">Загрузите аудиофайл</strong>
+        <span id="drop-description">Перетащите сюда или выберите с устройства</span>
+        <span class="drop-zone__cta">Выбрать аудио</span>
+        <span class="drop-zone__meta">MP3, WAV, M4A · до 200 МБ · до 10 минут</span>
       </div>
       <div class="error-message" id="error-message" role="alert" hidden>
         <span id="error-text"></span>
@@ -34,20 +38,26 @@ app.innerHTML = `
       </div>
       <section class="player" id="player" hidden>
         <div class="player__toolbar" aria-label="Действия с аудиофайлом">
-          <strong id="file-name"></strong>
+          <div class="player__file">
+            <span class="player__file-icon" aria-hidden="true">♬</span>
+            <strong id="file-name"></strong>
+          </div>
           <div class="player__actions">
             <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
-            <button class="button button--secondary" id="refine-button" type="button" hidden>Уточнить ML</button>
-            <button class="button button--secondary" id="replace-button" type="button">Другой файл</button>
+            <button class="button button--accent" id="refine-button" type="button" hidden>Уточнить ML</button>
+            <button class="button button--neutral" id="replace-button" type="button">Заменить</button>
           </div>
         </div>
-        <div class="player__topline">
-          <span id="time-label">0:00 / 0:00</span>
+        <div class="player__rail">
+          <span>Клик — перемотка · Удержание — нота</span>
+          <span class="player__rail-duration" id="rail-duration">0:00</span>
         </div>
-        <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Стрелки перемещают позицию на пять секунд."></canvas>
+        <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Кликните по ленте, чтобы перемотать. Удерживайте клавишу или строку спектра, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
         <div class="player__controls">
-          <button class="button" id="play-button" type="button">Воспроизвести</button>
+          <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести"><span aria-hidden="true">▶</span></button>
+          <span class="player__time" id="current-time">0:00</span>
           <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
+          <span class="player__time player__time--duration" id="duration-time">0:00</span>
         </div>
       </section>
     </section>
@@ -72,7 +82,9 @@ const elements = {
   canvas: requiredElement<HTMLCanvasElement>('piano-roll'),
   playButton: requiredElement<HTMLButtonElement>('play-button'),
   timeline: requiredElement<HTMLInputElement>('timeline'),
-  timeLabel: requiredElement<HTMLElement>('time-label'),
+  currentTime: requiredElement<HTMLElement>('current-time'),
+  durationTime: requiredElement<HTMLElement>('duration-time'),
+  railDuration: requiredElement<HTMLElement>('rail-duration'),
 };
 
 const analysisClient = new AnalysisClient();
@@ -258,6 +270,7 @@ async function loadFile(file: File): Promise<void> {
   elements.fileName.textContent = file.name;
   elements.player.hidden = true;
   elements.dropZone.hidden = false;
+  elements.workspace.dataset.state = 'loading';
   clearError();
   setPhase(AnalysisPhase.Loading);
   let hasFastPreview = false;
@@ -281,6 +294,8 @@ async function loadFile(file: File): Promise<void> {
         renderer.setAnalysis(preview, decoded.durationSeconds);
         elements.timeline.max = String(decoded.durationSeconds);
         elements.timeline.value = '0';
+        elements.durationTime.textContent = formatTime(decoded.durationSeconds);
+        elements.railDuration.textContent = formatTime(decoded.durationSeconds);
         elements.player.hidden = false;
         setPhase(AnalysisPhase.PreviewReady);
         elements.status.textContent = 'Предварительный спектр готов. Строим полную ленту.';
@@ -296,6 +311,8 @@ async function loadFile(file: File): Promise<void> {
     renderer.setAnalysis(fastResult, decoded.durationSeconds);
     elements.timeline.max = String(decoded.durationSeconds);
     elements.timeline.value = '0';
+    elements.durationTime.textContent = formatTime(decoded.durationSeconds);
+    elements.railDuration.textContent = formatTime(decoded.durationSeconds);
     elements.player.hidden = false;
     setPhase(AnalysisPhase.FastReady);
     updatePlaybackUi();
@@ -382,6 +399,7 @@ async function startPlayback(): Promise<void> {
 
 function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
   phase = nextPhase;
+  elements.workspace.dataset.state = phase === AnalysisPhase.Loading || phase === AnalysisPhase.FastAnalyzing ? 'loading' : 'ready';
   elements.workspace.setAttribute(
     'aria-busy',
     String(
@@ -392,8 +410,8 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     ),
   );
   if (phase === AnalysisPhase.Idle) {
-    elements.dropTitle.textContent = 'Перетащите аудиофайл сюда';
-    elements.dropDescription.textContent = 'или выберите файл с устройства';
+    elements.dropTitle.textContent = 'Загрузите аудиофайл';
+    elements.dropDescription.textContent = 'Перетащите сюда или выберите с устройства';
     elements.status.textContent = 'Можно выбрать аудиофайл.';
   } else if (phase === AnalysisPhase.Loading) {
     elements.dropTitle.textContent = 'Декодируем аудио…';
@@ -439,9 +457,13 @@ function updatePlaybackUi(): void {
     return;
   }
   const currentTime = audioPlayer.currentTimeSeconds;
-  elements.playButton.textContent = audioPlayer.isPlaying ? 'Пауза' : 'Воспроизвести';
+  elements.playButton.innerHTML = `<span aria-hidden="true">${audioPlayer.isPlaying ? 'Ⅱ' : '▶'}</span>`;
+  elements.playButton.setAttribute('aria-label', audioPlayer.isPlaying ? 'Пауза' : 'Воспроизвести');
+  elements.playButton.title = audioPlayer.isPlaying ? 'Пауза' : 'Воспроизвести';
   elements.timeline.value = String(currentTime);
-  elements.timeLabel.textContent = `${formatTime(currentTime)} / ${formatTime(audioPlayer.durationSeconds)}`;
+  elements.currentTime.textContent = formatTime(currentTime);
+  elements.durationTime.textContent = formatTime(audioPlayer.durationSeconds);
+  elements.railDuration.textContent = formatTime(audioPlayer.durationSeconds);
   renderer.render(currentTime);
 }
 
