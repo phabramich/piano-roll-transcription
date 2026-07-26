@@ -626,7 +626,7 @@ export class PianoRollRenderer {
 
 function activationToAlpha(activation: number): number {
   const normalized = activation / 255;
-  return 0.12 + 0.88 * normalized ** 1.35;
+  return normalized ** 1.2;
 }
 
 function createTileCanvas(width: number, height: number): TileCanvas {
