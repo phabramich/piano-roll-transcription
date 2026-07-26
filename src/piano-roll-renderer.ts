@@ -584,6 +584,9 @@ export class PianoRollRenderer {
       POINTER_MOVE_CANCEL_DISTANCE
     ) {
       window.clearTimeout(gesture.holdTimeoutId);
+      if (gesture.region === CanvasPointerRegion.Grid) {
+        gesture.shouldSuppressCanvasClick = true;
+      }
       if (gesture.isAuditioning) {
         gesture.isAuditioning = false;
         this.onPianoKeyStop?.();
