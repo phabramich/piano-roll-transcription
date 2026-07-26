@@ -48,17 +48,17 @@ app.innerHTML = `
             <button class="button button--neutral" id="replace-button" type="button">Заменить</button>
           </div>
         </div>
-        <div class="player__rail">
-          <span>Клик — перемотка · Удержание — нота</span>
-          <span class="player__rail-duration" id="rail-duration">0:00</span>
-        </div>
-        <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Кликните по ленте, чтобы перемотать. Удерживайте клавишу или строку спектра, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
         <div class="player__controls">
           <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести"><span aria-hidden="true">▶</span></button>
           <span class="player__time" id="current-time">0:00</span>
           <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
           <span class="player__time player__time--duration" id="duration-time">0:00</span>
         </div>
+        <div class="player__rail">
+          <span>Клик — перемотка · Удержание — нота</span>
+          <span class="player__rail-duration" id="rail-duration">0:00</span>
+        </div>
+        <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Кликните по ленте, чтобы перемотать. Удерживайте клавишу или строку спектра, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
       </section>
     </section>
   </main>

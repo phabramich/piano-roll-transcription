@@ -194,7 +194,6 @@ h1 {
   justify-content: space-between;
   gap: 16px;
   padding: 9px 18px;
-  border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   background: var(--surface-muted);
   color: var(--muted);
@@ -221,6 +220,7 @@ h1 {
   gap: 12px;
   padding: 14px 18px 16px;
   border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
 .play-button {
