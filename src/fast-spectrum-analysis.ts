@@ -5,6 +5,8 @@ const PITCH_COUNT = 88;
 const SAMPLE_RATE = 22050;
 const FFT_SIZE = 8192;
 const HOP_SIZE = 2048;
+const NORMALIZATION_FLOOR = 0.14;
+const NORMALIZATION_GAMMA = 1.8;
 
 export class FastSpectrumAnalyzer {
   public readonly frameCount: number;
@@ -178,6 +180,11 @@ function normalize(
     return;
   }
   for (let index = 0; index < values.length; index += 1) {
-    values[index] = Math.round((energies[index] / maximum) * 255);
+    const normalized = energies[index] / maximum;
+    const contrasted = Math.max(
+      0,
+      (normalized - NORMALIZATION_FLOOR) / (1 - NORMALIZATION_FLOOR),
+    ) ** NORMALIZATION_GAMMA;
+    values[index] = Math.round(contrasted * 255);
   }
 }

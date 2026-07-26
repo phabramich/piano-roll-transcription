@@ -3,6 +3,7 @@ import { AnalysisErrorCode, AnalysisPhase } from './analysis-types';
 import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-player';
 import { FastSpectrumClient, FastSpectrumClientError } from './fast-spectrum';
 import { PianoRollRenderer } from './piano-roll-renderer';
+import { PianoAudition } from './piano-audition';
 import './style.css';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -67,6 +68,7 @@ const elements = {
 const analysisClient = new AnalysisClient();
 const fastSpectrumClient = new FastSpectrumClient();
 const audioPlayer = new AudioPlayer();
+const pianoAudition = new PianoAudition();
 const renderer = new PianoRollRenderer(elements.canvas);
 let phase = AnalysisPhase.Idle;
 let analysisGeneration = 0;
@@ -89,6 +91,19 @@ renderer.onSeek = seconds => {
   audioPlayer.seek(seconds);
   updatePlaybackUi();
   requestAnimation();
+};
+renderer.onPianoKeyPrepare = () => {
+  if (!disposed) {
+    pianoAudition.prepare();
+  }
+};
+renderer.onPianoKeyStart = midi => {
+  if (!disposed) {
+    pianoAudition.start(midi);
+  }
+};
+renderer.onPianoKeyStop = () => {
+  pianoAudition.stop();
 };
 
 elements.fileInput.addEventListener('change', () => {
@@ -202,6 +217,7 @@ window.addEventListener('beforeunload', () => {
   analysisClient.dispose();
   fastSpectrumClient.dispose();
   audioPlayer.dispose();
+  pianoAudition.dispose();
   renderer.dispose();
 });
 
