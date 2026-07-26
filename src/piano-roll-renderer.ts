@@ -11,7 +11,7 @@ const TILE_SECONDS = 4;
 const TILE_CACHE_LIMIT = 4;
 const HOLD_DELAY_MS = 200;
 const POINTER_MOVE_CANCEL_DISTANCE = 8;
-const KEY_ACTIVATION_THRESHOLD = 24;
+const KEY_ACTIVATION_THRESHOLD = 14;
 
 type TileCanvas = HTMLCanvasElement | OffscreenCanvas;
 type TileContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -73,6 +73,9 @@ export class PianoRollRenderer {
     canvas.addEventListener('pointerup', this.handlePointerEnd);
     canvas.addEventListener('pointercancel', this.handlePointerEnd);
     canvas.addEventListener('pointerleave', this.handlePointerLeave);
+    canvas.addEventListener('lostpointercapture', this.handlePointerEnd);
+    window.addEventListener('blur', this.handleWindowBlur);
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
     this.render(0);
   }
 
@@ -156,6 +159,9 @@ export class PianoRollRenderer {
     this.canvas.removeEventListener('pointerup', this.handlePointerEnd);
     this.canvas.removeEventListener('pointercancel', this.handlePointerEnd);
     this.canvas.removeEventListener('pointerleave', this.handlePointerLeave);
+    this.canvas.removeEventListener('lostpointercapture', this.handlePointerEnd);
+    window.removeEventListener('blur', this.handleWindowBlur);
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     this.endPianoPointerGesture();
     if (this.suppressClickTimeoutId !== null) {
       window.clearTimeout(this.suppressClickTimeoutId);
@@ -585,11 +591,22 @@ export class PianoRollRenderer {
     }
   };
 
+  private readonly handleWindowBlur = (): void => {
+    this.endPianoPointerGesture();
+  };
+
+  private readonly handleVisibilityChange = (): void => {
+    if (document.visibilityState === 'hidden') {
+      this.endPianoPointerGesture();
+    }
+  };
+
   private endPianoPointerGesture(): void {
     const gesture = this.pianoPointerGesture;
     if (gesture === null) {
       return;
     }
+    this.pianoPointerGesture = null;
     window.clearTimeout(gesture.holdTimeoutId);
     if (gesture.isAuditioning) {
       this.onPianoKeyStop?.();
@@ -597,7 +614,6 @@ export class PianoRollRenderer {
     if (this.canvas.hasPointerCapture(gesture.pointerId)) {
       this.canvas.releasePointerCapture(gesture.pointerId);
     }
-    this.pianoPointerGesture = null;
     if (this.suppressClickTimeoutId !== null) {
       window.clearTimeout(this.suppressClickTimeoutId);
     }
@@ -610,7 +626,7 @@ export class PianoRollRenderer {
 
 function activationToAlpha(activation: number): number {
   const normalized = activation / 255;
-  return normalized ** 2.1;
+  return 0.12 + 0.88 * normalized ** 1.35;
 }
 
 function createTileCanvas(width: number, height: number): TileCanvas {

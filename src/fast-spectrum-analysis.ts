@@ -5,8 +5,8 @@ const PITCH_COUNT = 88;
 const SAMPLE_RATE = 22050;
 const FFT_SIZE = 8192;
 const HOP_SIZE = 2048;
-const NORMALIZATION_FLOOR = 0.14;
-const NORMALIZATION_GAMMA = 1.8;
+const NORMALIZATION_FLOOR = 0.07;
+const NORMALIZATION_GAMMA = 1.4;
 
 export class FastSpectrumAnalyzer {
   public readonly frameCount: number;
