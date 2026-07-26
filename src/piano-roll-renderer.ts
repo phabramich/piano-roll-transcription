@@ -26,13 +26,20 @@ interface TemporalTile {
   cssWidth: number;
 }
 
+enum CanvasPointerRegion {
+  Keyboard,
+  Grid,
+}
+
 interface PianoPointerGesture {
   pointerId: number;
   midi: number;
+  region: CanvasPointerRegion;
   startX: number;
   startY: number;
   holdTimeoutId: number;
   isAuditioning: boolean;
+  shouldSuppressCanvasClick: boolean;
 }
 
 export class PianoRollRenderer {
@@ -522,35 +529,38 @@ export class PianoRollRenderer {
 
   private readonly handlePointerDown = (event: PointerEvent): void => {
     const rect = this.canvas.getBoundingClientRect();
-    if (event.clientX >= rect.left + PIANO_KEYBOARD_WIDTH) {
-      return;
-    }
     const rowHeight = rect.height / 88;
     const row = Math.floor((event.clientY - rect.top) / rowHeight);
     if (row < 0 || row >= 88) {
       return;
     }
 
-    this.endPianoPointerGesture();
-    this.suppressNextCanvasClick = true;
+    this.endPianoPointerGesture(true);
     this.canvas.setPointerCapture(event.pointerId);
     this.onPianoKeyPrepare?.();
     const midi = LAST_MIDI_NOTE - row;
+    const region =
+      event.clientX < rect.left + PIANO_KEYBOARD_WIDTH
+        ? CanvasPointerRegion.Keyboard
+        : CanvasPointerRegion.Grid;
     const holdTimeoutId = window.setTimeout(() => {
       const gesture = this.pianoPointerGesture;
       if (gesture === null || gesture.pointerId !== event.pointerId) {
         return;
       }
       gesture.isAuditioning = true;
+      gesture.shouldSuppressCanvasClick = true;
       this.onPianoKeyStart?.(gesture.midi);
     }, HOLD_DELAY_MS);
     this.pianoPointerGesture = {
       pointerId: event.pointerId,
       midi,
+      region,
       startX: event.clientX,
       startY: event.clientY,
       holdTimeoutId,
       isAuditioning: false,
+      shouldSuppressCanvasClick: false,
     };
   };
 
@@ -573,54 +583,65 @@ export class PianoRollRenderer {
       Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) >=
       POINTER_MOVE_CANCEL_DISTANCE
     ) {
-      this.endPianoPointerGesture();
+      window.clearTimeout(gesture.holdTimeoutId);
+      if (gesture.isAuditioning) {
+        gesture.isAuditioning = false;
+        this.onPianoKeyStop?.();
+      }
     }
   };
 
   private readonly handlePointerEnd = (event: PointerEvent): void => {
     const gesture = this.pianoPointerGesture;
     if (gesture !== null && gesture.pointerId === event.pointerId) {
-      this.endPianoPointerGesture();
+      this.endPianoPointerGesture(event.type !== 'pointerup');
     }
   };
 
   private readonly handlePointerLeave = (event: PointerEvent): void => {
     const gesture = this.pianoPointerGesture;
     if (gesture !== null && gesture.pointerId === event.pointerId) {
-      this.endPianoPointerGesture();
+      this.endPianoPointerGesture(true);
     }
   };
 
   private readonly handleWindowBlur = (): void => {
-    this.endPianoPointerGesture();
+    this.endPianoPointerGesture(true);
   };
 
   private readonly handleVisibilityChange = (): void => {
     if (document.visibilityState === 'hidden') {
-      this.endPianoPointerGesture();
+      this.endPianoPointerGesture(true);
     }
   };
 
-  private endPianoPointerGesture(): void {
+  private endPianoPointerGesture(forceSuppressCanvasClick = false): void {
     const gesture = this.pianoPointerGesture;
     if (gesture === null) {
       return;
     }
     this.pianoPointerGesture = null;
     window.clearTimeout(gesture.holdTimeoutId);
+    const shouldSuppressCanvasClick =
+      forceSuppressCanvasClick ||
+      gesture.region === CanvasPointerRegion.Keyboard ||
+      gesture.shouldSuppressCanvasClick;
     if (gesture.isAuditioning) {
       this.onPianoKeyStop?.();
     }
     if (this.canvas.hasPointerCapture(gesture.pointerId)) {
       this.canvas.releasePointerCapture(gesture.pointerId);
     }
-    if (this.suppressClickTimeoutId !== null) {
-      window.clearTimeout(this.suppressClickTimeoutId);
+    if (shouldSuppressCanvasClick) {
+      this.suppressNextCanvasClick = true;
+      if (this.suppressClickTimeoutId !== null) {
+        window.clearTimeout(this.suppressClickTimeoutId);
+      }
+      this.suppressClickTimeoutId = window.setTimeout(() => {
+        this.suppressNextCanvasClick = false;
+        this.suppressClickTimeoutId = null;
+      }, 0);
     }
-    this.suppressClickTimeoutId = window.setTimeout(() => {
-      this.suppressNextCanvasClick = false;
-      this.suppressClickTimeoutId = null;
-    }, 0);
   }
 }
 
