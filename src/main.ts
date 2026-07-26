@@ -14,51 +14,52 @@ if (app === null) {
 app.innerHTML = `
   <main class="application">
     <header class="application__header">
-      <div>
-        <p class="application__eyebrow">Локальный анализ аудио</p>
+      <div class="application__brand" aria-label="Spectral Score">
+        <span class="application__mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <h1>SPECTRAL SCORE</h1>
       </div>
-      <p class="application__privacy">Аудио обрабатывается только на вашем устройстве и никуда не загружается.</p>
+      <p class="application__privacy"><span aria-hidden="true">●</span> Локальная обработка</p>
     </header>
     <section class="workspace" id="workspace" aria-busy="false">
       <p class="visually-hidden" id="status" role="status" aria-live="polite"></p>
       <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-controls="file-input">
         <input id="file-input" type="file" accept="audio/*" hidden>
-        <span class="drop-zone__icon" aria-hidden="true">
-          <svg viewBox="0 0 56 56" fill="none"><path d="M9 30.5h6l4.5-12 8 25 6.5-19 4.5 10H47" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="28" cy="28" r="25" stroke="currentColor" stroke-width="1.5" opacity=".25"/></svg>
+        <span class="drop-zone__motif" aria-hidden="true">
+          <svg viewBox="0 0 500 112" fill="none" preserveAspectRatio="none"><path d="M0 57h500M0 33h500M0 81h500" stroke="currentColor" opacity=".12"/><path d="M0 74c14-2 19-37 33-37 14 0 20 62 35 62 16 0 21-74 36-74 13 0 18 50 31 50 14 0 19-22 33-22 15 0 19 34 33 34 14 0 20-67 35-67 14 0 19 43 33 43 14 0 20-29 35-29 13 0 19 54 32 54 15 0 20-44 35-44 15 0 20 28 35 28 14 0 20-20 35-20 15 0 19 42 34 42 14 0 19-69 34-69 15 0 20 45 35 45 14 0 19-22 33-22 15 0 20 35 34 35" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         </span>
-        <strong id="drop-title">Загрузите аудиофайл</strong>
-        <span id="drop-description">Перетащите сюда или выберите с устройства</span>
-        <span class="drop-zone__cta">Выбрать аудио</span>
-        <span class="drop-zone__meta">MP3, WAV, M4A · до 200 МБ · до 10 минут</span>
+        <div class="drop-zone__copy">
+          <strong id="drop-title">Открыть аудиодорожку</strong>
+          <span id="drop-description">Перетащите файл или выберите с устройства</span>
+        </div>
+        <span class="drop-zone__cta">Выбрать файл <b aria-hidden="true">→</b></span>
+        <span class="drop-zone__meta">MP3 · WAV · M4A &nbsp; / &nbsp; до 200 МБ</span>
       </div>
       <div class="error-message" id="error-message" role="alert" hidden>
         <span id="error-text"></span>
         <button class="button button--secondary" id="recovery-button" type="button">Выбрать другой файл</button>
       </div>
       <section class="player" id="player" hidden>
-        <div class="player__toolbar" aria-label="Действия с аудиофайлом">
-          <div class="player__file">
-            <span class="player__file-icon" aria-hidden="true">♬</span>
-            <strong id="file-name"></strong>
+        <div class="player__deck">
+          <div class="player__toolbar" aria-label="Действия с аудиофайлом">
+            <div class="player__file">
+              <span class="player__file-icon" aria-hidden="true">♬</span>
+              <strong id="file-name"></strong>
+            </div>
+            <div class="player__actions">
+              <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
+              <button class="button button--accent" id="refine-button" type="button" hidden>Уточнить ML</button>
+              <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить аудиофайл" title="Заменить аудиофайл"><span aria-hidden="true">↗</span><span class="button__label">Заменить</span></button>
+            </div>
           </div>
-          <div class="player__actions">
-            <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
-            <button class="button button--accent" id="refine-button" type="button" hidden>Уточнить ML</button>
-            <button class="button button--neutral" id="replace-button" type="button">Заменить</button>
+          <div class="player__controls">
+            <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести"><span aria-hidden="true">▶</span></button>
+            <span class="player__time" id="current-time">0:00</span>
+            <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
+            <span class="player__time player__time--duration" id="duration-time">0:00</span>
           </div>
-        </div>
-        <div class="player__controls">
-          <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести"><span aria-hidden="true">▶</span></button>
-          <span class="player__time" id="current-time">0:00</span>
-          <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
-          <span class="player__time player__time--duration" id="duration-time">0:00</span>
-        </div>
-        <div class="player__rail">
-          <span>Клик — перемотка · Удержание — нота</span>
-          <span class="player__rail-duration" id="rail-duration">0:00</span>
         </div>
         <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Кликните по ленте, чтобы перемотать. Удерживайте клавишу или строку спектра, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
+        <div class="player__rail"><span>Клик — перемотка&nbsp;&nbsp;·&nbsp;&nbsp;Удержание — нота</span><span class="player__rail-duration" id="rail-duration">0:00</span></div>
       </section>
     </section>
   </main>
