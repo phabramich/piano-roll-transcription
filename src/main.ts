@@ -33,8 +33,15 @@ app.innerHTML = `
         <button class="button button--secondary" id="recovery-button" type="button">Выбрать другой файл</button>
       </div>
       <section class="player" id="player" hidden>
-        <div class="player__topline">
+        <div class="player__toolbar" aria-label="Действия с аудиофайлом">
           <strong id="file-name"></strong>
+          <div class="player__actions">
+            <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
+            <button class="button button--secondary" id="refine-button" type="button" hidden>Уточнить ML</button>
+            <button class="button button--secondary" id="replace-button" type="button">Другой файл</button>
+          </div>
+        </div>
+        <div class="player__topline">
           <span id="time-label">0:00 / 0:00</span>
         </div>
         <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Стрелки перемещают позицию на пять секунд."></canvas>
@@ -59,6 +66,9 @@ const elements = {
   recoveryButton: requiredElement<HTMLButtonElement>('recovery-button'),
   player: requiredElement<HTMLElement>('player'),
   fileName: requiredElement<HTMLElement>('file-name'),
+  analysisStatus: requiredElement<HTMLElement>('analysis-status'),
+  refineButton: requiredElement<HTMLButtonElement>('refine-button'),
+  replaceButton: requiredElement<HTMLButtonElement>('replace-button'),
   canvas: requiredElement<HTMLCanvasElement>('piano-roll'),
   playButton: requiredElement<HTMLButtonElement>('play-button'),
   timeline: requiredElement<HTMLInputElement>('timeline'),
@@ -75,6 +85,8 @@ let analysisGeneration = 0;
 let animationFrameId: number | null = null;
 let scrubbing = false;
 let disposed = false;
+let decodedSamples: Float32Array | null = null;
+let fullFastSpectrumReady = false;
 
 audioPlayer.onStateChange = () => {
   if (disposed) {
@@ -210,6 +222,16 @@ elements.recoveryButton.addEventListener('click', () => {
   }
 });
 
+elements.replaceButton.addEventListener('click', () => {
+  if (!disposed) {
+    elements.fileInput.click();
+  }
+});
+
+elements.refineButton.addEventListener('click', () => {
+  void refineWithModel();
+});
+
 window.addEventListener('beforeunload', () => {
   disposed = true;
   analysisGeneration += 1;
@@ -231,8 +253,11 @@ async function loadFile(file: File): Promise<void> {
   audioPlayer.reset();
   renderer.clear();
   cancelAnimation();
+  decodedSamples = null;
+  fullFastSpectrumReady = false;
   elements.fileName.textContent = file.name;
   elements.player.hidden = true;
+  elements.dropZone.hidden = false;
   clearError();
   setPhase(AnalysisPhase.Loading);
   let hasFastPreview = false;
@@ -244,6 +269,8 @@ async function loadFile(file: File): Promise<void> {
       return;
     }
 
+    decodedSamples = decoded.samples;
+    elements.dropZone.hidden = true;
     setPhase(AnalysisPhase.FastAnalyzing);
     const fastResult = await fastSpectrumClient.analyze(decoded.samples, {
       onPreview: preview => {
@@ -255,9 +282,7 @@ async function loadFile(file: File): Promise<void> {
         elements.timeline.max = String(decoded.durationSeconds);
         elements.timeline.value = '0';
         elements.player.hidden = false;
-        setPhase(AnalysisPhase.FastReady);
-        elements.dropTitle.textContent = 'Предварительный спектр готов';
-        elements.dropDescription.textContent = 'Можно воспроизводить и перематывать, строим полную ленту';
+        setPhase(AnalysisPhase.PreviewReady);
         elements.status.textContent = 'Предварительный спектр готов. Строим полную ленту.';
         updatePlaybackUi();
       },
@@ -266,33 +291,13 @@ async function loadFile(file: File): Promise<void> {
       return;
     }
     hasFullFastSpectrum = true;
+    fullFastSpectrumReady = true;
 
     renderer.setAnalysis(fastResult, decoded.durationSeconds);
     elements.timeline.max = String(decoded.durationSeconds);
     elements.timeline.value = '0';
     elements.player.hidden = false;
     setPhase(AnalysisPhase.FastReady);
-    updatePlaybackUi();
-
-    await yieldToBrowser();
-    if (generation !== analysisGeneration) {
-      return;
-    }
-
-    setPhase(AnalysisPhase.Refining, 0);
-    const result = await analysisClient.analyze(decoded.samples, {
-      onProgress: progress => {
-        if (generation === analysisGeneration) {
-          setPhase(AnalysisPhase.Refining, progress);
-        }
-      },
-    });
-    if (generation !== analysisGeneration) {
-      return;
-    }
-
-    renderer.setAnalysis(result, decoded.durationSeconds);
-    setPhase(AnalysisPhase.Complete);
     updatePlaybackUi();
   } catch (error) {
     if (generation !== analysisGeneration || isCancelled(error)) {
@@ -304,14 +309,52 @@ async function loadFile(file: File): Promise<void> {
       return;
     }
     if (isPlaybackReady() && hasFastPreview) {
-      setPhase(AnalysisPhase.FastReady);
-      elements.dropTitle.textContent = 'Предварительный спектр готов';
-      elements.dropDescription.textContent = 'Не удалось построить полную ленту';
+      setPhase(AnalysisPhase.PreviewReady);
       elements.status.textContent = 'Предварительный спектр готов. Полная лента недоступна.';
       return;
     }
+    elements.dropZone.hidden = false;
     setPhase(AnalysisPhase.Failed);
     showError(toErrorMessage(error));
+  }
+}
+
+async function refineWithModel(): Promise<void> {
+  const samples = decodedSamples;
+  if (
+    disposed ||
+    !fullFastSpectrumReady ||
+    samples === null ||
+    phase === AnalysisPhase.Refining ||
+    phase === AnalysisPhase.Complete
+  ) {
+    return;
+  }
+
+  const generation = analysisGeneration;
+  clearError();
+  setPhase(AnalysisPhase.Refining, 0);
+  try {
+    const result = await analysisClient.analyze(samples, {
+      onProgress: progress => {
+        if (generation === analysisGeneration) {
+          setPhase(AnalysisPhase.Refining, progress);
+        }
+      },
+    });
+    if (disposed || generation !== analysisGeneration) {
+      return;
+    }
+    renderer.setAnalysis(result, audioPlayer.durationSeconds);
+    setPhase(AnalysisPhase.Complete);
+    updatePlaybackUi();
+  } catch (error) {
+    if (disposed || generation !== analysisGeneration || isCancelled(error)) {
+      return;
+    }
+    setPhase(AnalysisPhase.FastReady);
+    showError(`${toErrorMessage(error)} Быстрый спектр сохранён — можно повторить уточнение.`);
+    elements.status.textContent = 'Уточнение ML не завершилось. Быстрый спектр сохранён.';
   }
 }
 
@@ -359,18 +402,29 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     elements.dropTitle.textContent = 'Строим быстрый спектр…';
     elements.dropDescription.textContent = 'Сопоставляем частоты с 88 клавишами пианино';
     elements.status.textContent = 'Строим быстрый спектр.';
+  } else if (phase === AnalysisPhase.PreviewReady) {
+    elements.analysisStatus.textContent = 'Предварительный спектр готов';
+    elements.refineButton.hidden = true;
+    elements.refineButton.disabled = true;
+    elements.status.textContent = 'Предварительный спектр готов. Строим полную ленту.';
   } else if (phase === AnalysisPhase.FastReady) {
-    elements.dropTitle.textContent = 'Быстрый спектр готов';
-    elements.dropDescription.textContent = 'Воспроизведение доступно, уточняем ноты в фоне';
+    elements.analysisStatus.textContent = 'Быстрый спектр готов';
+    elements.refineButton.hidden = !fullFastSpectrumReady;
+    elements.refineButton.disabled = !fullFastSpectrumReady;
+    elements.refineButton.textContent = 'Уточнить ML';
     elements.status.textContent = 'Быстрый спектр готов. Можно воспроизводить и перематывать.';
   } else if (phase === AnalysisPhase.Refining) {
     const percentage = Math.round(progress * 100);
-    elements.dropTitle.textContent = `Уточняем ноты моделью: ${percentage}%`;
-    elements.dropDescription.textContent = 'Быстрый спектр уже доступен для воспроизведения';
+    elements.analysisStatus.textContent = `Уточняем ML: ${percentage}%`;
+    elements.refineButton.hidden = false;
+    elements.refineButton.disabled = true;
+    elements.refineButton.textContent = 'Уточняем ML…';
     elements.status.textContent = `Быстрый спектр готов. Уточняем ноты моделью: ${percentage}%.`;
   } else if (phase === AnalysisPhase.Complete) {
-    elements.dropTitle.textContent = 'Выберите другой аудиофайл';
-    elements.dropDescription.textContent = 'Новый файл заменит текущую партитуру';
+    elements.analysisStatus.textContent = 'Уточнение готово';
+    elements.refineButton.hidden = false;
+    elements.refineButton.disabled = true;
+    elements.refineButton.textContent = 'Уточнение готово';
     elements.status.textContent = 'Анализ завершён. Партитура готова.';
   } else {
     elements.dropTitle.textContent = 'Не удалось обработать файл';
@@ -392,6 +446,7 @@ function updatePlaybackUi(): void {
 
 function isPlaybackReady(): boolean {
   return (
+    phase === AnalysisPhase.PreviewReady ||
     phase === AnalysisPhase.FastReady ||
     phase === AnalysisPhase.Refining ||
     phase === AnalysisPhase.Complete
@@ -479,10 +534,6 @@ function toErrorMessage(error: unknown): string {
 function formatTime(seconds: number): string {
   const safeSeconds = Math.max(0, Math.floor(seconds));
   return `${Math.floor(safeSeconds / 60)}:${String(safeSeconds % 60).padStart(2, '0')}`;
-}
-
-function yieldToBrowser(): Promise<void> {
-  return new Promise(resolve => window.setTimeout(resolve, 0));
 }
 
 function requiredElement<ElementType extends HTMLElement>(id: string): ElementType {

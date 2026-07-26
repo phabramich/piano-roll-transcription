@@ -3,7 +3,9 @@ import { DESIGN_COLORS } from './design-colors';
 
 const FIRST_MIDI_NOTE = 21;
 const LAST_MIDI_NOTE = 108;
-const PIANO_KEYBOARD_WIDTH = 72;
+const DESKTOP_PIANO_KEYBOARD_WIDTH = 72;
+const MOBILE_PIANO_KEYBOARD_WIDTH = 52;
+const MOBILE_BREAKPOINT_PX = 700;
 const VISIBLE_SECONDS = 12;
 const PLAYHEAD_POSITION = 0.36;
 const NOTES_PER_INDEX_BLOCK = 64;
@@ -119,7 +121,7 @@ export class PianoRollRenderer {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, cssWidth, cssHeight);
 
-    const gridLeft = PIANO_KEYBOARD_WIDTH;
+    const gridLeft = this.getKeyboardWidth();
     const gridWidth = Math.max(0, cssWidth - gridLeft);
     const rowHeight = cssHeight / 88;
     const windowStart = currentTimeSeconds - VISIBLE_SECONDS * PLAYHEAD_POSITION;
@@ -210,15 +212,16 @@ export class PianoRollRenderer {
 
   private drawKeyboard(rowHeight: number, height: number): void {
     const context = this.context;
+    const keyboardWidth = this.getKeyboardWidth();
     for (let row = 0; row < 88; row += 1) {
       const midi = LAST_MIDI_NOTE - row;
       const y = row * rowHeight;
       context.fillStyle = isBlackKey(midi)
         ? DESIGN_COLORS.text
         : DESIGN_COLORS.surface;
-      context.fillRect(0, y, PIANO_KEYBOARD_WIDTH, rowHeight + 0.5);
+      context.fillRect(0, y, keyboardWidth, rowHeight + 0.5);
       context.strokeStyle = DESIGN_COLORS.grid;
-      context.strokeRect(0, y, PIANO_KEYBOARD_WIDTH, rowHeight);
+      context.strokeRect(0, y, keyboardWidth, rowHeight);
 
       if (midi % 12 === 0 || midi === FIRST_MIDI_NOTE) {
         context.fillStyle = isBlackKey(midi)
@@ -235,7 +238,7 @@ export class PianoRollRenderer {
     }
 
     context.strokeStyle = DESIGN_COLORS.text;
-    context.strokeRect(0, 0, PIANO_KEYBOARD_WIDTH, height);
+    context.strokeRect(0, 0, keyboardWidth, height);
   }
 
   private drawGrid(
@@ -473,6 +476,7 @@ export class PianoRollRenderer {
     );
     this.context.fillStyle = DESIGN_COLORS.note;
     this.context.save();
+    const keyboardWidth = this.getKeyboardWidth();
     this.context.globalAlpha = 0.82;
     for (let pitch = 0; pitch < result.pitchCount; pitch += 1) {
       const activation = result.frameProbabilities[
@@ -487,7 +491,7 @@ export class PianoRollRenderer {
       this.context.fillRect(
         1,
         row * rowHeight + 1,
-        PIANO_KEYBOARD_WIDTH - 2,
+        keyboardWidth - 2,
         Math.max(1, rowHeight - 2),
       );
       this.context.globalAlpha = 0.75 + alpha * 0.25;
@@ -496,7 +500,7 @@ export class PianoRollRenderer {
       this.context.strokeRect(
         1,
         row * rowHeight + 1,
-        PIANO_KEYBOARD_WIDTH - 2,
+        keyboardWidth - 2,
         Math.max(1, rowHeight - 2),
       );
     }
@@ -509,11 +513,12 @@ export class PianoRollRenderer {
       return;
     }
     const rect = this.canvas.getBoundingClientRect();
-    if (event.clientX < rect.left + PIANO_KEYBOARD_WIDTH) {
+    const keyboardWidth = this.getKeyboardWidth();
+    if (event.clientX < rect.left + keyboardWidth) {
       return;
     }
-    const x = event.clientX - rect.left - PIANO_KEYBOARD_WIDTH;
-    const width = Math.max(1, rect.width - PIANO_KEYBOARD_WIDTH);
+    const x = event.clientX - rect.left - keyboardWidth;
+    const width = Math.max(1, rect.width - keyboardWidth);
     const windowStart =
       this.currentTimeSeconds - VISIBLE_SECONDS * PLAYHEAD_POSITION;
     this.onSeek?.(
@@ -540,7 +545,7 @@ export class PianoRollRenderer {
     this.onPianoKeyPrepare?.();
     const midi = LAST_MIDI_NOTE - row;
     const region =
-      event.clientX < rect.left + PIANO_KEYBOARD_WIDTH
+      event.clientX < rect.left + this.getKeyboardWidth()
         ? CanvasPointerRegion.Keyboard
         : CanvasPointerRegion.Grid;
     const holdTimeoutId = window.setTimeout(() => {
@@ -645,6 +650,12 @@ export class PianoRollRenderer {
         this.suppressClickTimeoutId = null;
       }, 0);
     }
+  }
+
+  private getKeyboardWidth(): number {
+    return window.innerWidth <= MOBILE_BREAKPOINT_PX
+      ? MOBILE_PIANO_KEYBOARD_WIDTH
+      : DESKTOP_PIANO_KEYBOARD_WIDTH;
   }
 }
 
