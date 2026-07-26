@@ -14,6 +14,9 @@ const TILE_CACHE_LIMIT = 4;
 const HOLD_DELAY_MS = 200;
 const POINTER_MOVE_CANCEL_DISTANCE = 8;
 const KEY_ACTIVATION_THRESHOLD = 14;
+const DEFAULT_CONTRAST = 1.4;
+const MIN_CONTRAST = 0.7;
+const MAX_CONTRAST = 2.2;
 
 type TileCanvas = HTMLCanvasElement | OffscreenCanvas;
 type TileContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -55,6 +58,7 @@ export class PianoRollRenderer {
   private renderedCssWidth = 0;
   private renderedCssHeight = 0;
   private renderedPixelRatio = 0;
+  private contrast = DEFAULT_CONTRAST;
   private pianoPointerGesture: PianoPointerGesture | null = null;
   private suppressClickTimeoutId: number | null = null;
   private suppressNextCanvasClick = false;
@@ -109,6 +113,19 @@ export class PianoRollRenderer {
     this.currentTimeSeconds = 0;
     this.invalidateTileCache();
     this.render(0);
+  }
+
+  public setContrast(value: number): void {
+    if (this.disposed || !Number.isFinite(value)) {
+      return;
+    }
+    const nextContrast = Math.min(MAX_CONTRAST, Math.max(MIN_CONTRAST, value));
+    if (Math.abs(this.contrast - nextContrast) < 0.001) {
+      return;
+    }
+    this.contrast = nextContrast;
+    this.invalidateTileCache();
+    this.render(this.currentTimeSeconds);
   }
 
   public render(currentTimeSeconds: number): void {
@@ -409,7 +426,7 @@ export class PianoRollRenderer {
           continue;
         }
         const row = result.pitchCount - 1 - pitch;
-        context.globalAlpha = activationToAlpha(activation);
+        context.globalAlpha = activationToAlpha(activation, this.contrast);
         context.fillRect(x, row * rowHeight, frameWidth, rowHeight);
       }
     }
@@ -486,8 +503,11 @@ export class PianoRollRenderer {
         continue;
       }
       const row = result.pitchCount - 1 - pitch;
-      const alpha = activationToAlpha(activation);
-      this.context.globalAlpha = 0.42 + alpha * 0.58;
+      const alpha = activationToAlpha(activation, this.contrast);
+      if (alpha === 0) {
+        continue;
+      }
+      this.context.globalAlpha = 0.22 + alpha * 0.78;
       this.context.fillRect(
         1,
         row * rowHeight + 1,
@@ -659,9 +679,11 @@ export class PianoRollRenderer {
   }
 }
 
-function activationToAlpha(activation: number): number {
-  const normalized = activation / 255;
-  return normalized ** 1.2;
+function activationToAlpha(activation: number, contrast: number): number {
+  const normalized = Math.min(1, Math.max(0, activation / 255));
+  const floor = 0.05 + (contrast - MIN_CONTRAST) * 0.05;
+  const adjusted = Math.max(0, (normalized - floor) / (1 - floor));
+  return adjusted ** (1 + contrast * 0.42);
 }
 
 function createTileCanvas(width: number, height: number): TileCanvas {

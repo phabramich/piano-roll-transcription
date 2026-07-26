@@ -47,6 +47,11 @@ app.innerHTML = `
             </div>
             <div class="player__actions">
               <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
+              <label class="contrast-control" for="contrast">
+                <span class="contrast-control__label">Контраст</span>
+                <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст спектра и клавиш" aria-valuetext="Контраст: 1,4">
+                <output class="contrast-control__value" id="contrast-value" for="contrast">1,4×</output>
+              </label>
               <button class="button button--accent" id="refine-button" type="button" hidden>Уточнить ML</button>
               <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить аудиофайл" title="Заменить аудиофайл"><span aria-hidden="true">↗</span><span class="button__label">Заменить</span></button>
             </div>
@@ -80,6 +85,8 @@ const elements = {
   analysisStatus: requiredElement<HTMLElement>('analysis-status'),
   refineButton: requiredElement<HTMLButtonElement>('refine-button'),
   replaceButton: requiredElement<HTMLButtonElement>('replace-button'),
+  contrast: requiredElement<HTMLInputElement>('contrast'),
+  contrastValue: requiredElement<HTMLOutputElement>('contrast-value'),
   canvas: requiredElement<HTMLCanvasElement>('piano-roll'),
   playButton: requiredElement<HTMLButtonElement>('play-button'),
   timeline: requiredElement<HTMLInputElement>('timeline'),
@@ -243,6 +250,15 @@ elements.replaceButton.addEventListener('click', () => {
 
 elements.refineButton.addEventListener('click', () => {
   void refineWithModel();
+});
+
+elements.contrast.addEventListener('input', () => {
+  const contrast = Number(elements.contrast.value);
+  renderer.setContrast(contrast);
+  const text = formatContrast(contrast);
+  elements.contrastValue.value = text;
+  elements.contrastValue.textContent = text;
+  elements.contrast.setAttribute('aria-valuetext', `Контраст: ${text}`);
 });
 
 window.addEventListener('beforeunload', () => {
@@ -558,6 +574,10 @@ function toErrorMessage(error: unknown): string {
 function formatTime(seconds: number): string {
   const safeSeconds = Math.max(0, Math.floor(seconds));
   return `${Math.floor(safeSeconds / 60)}:${String(safeSeconds % 60).padStart(2, '0')}`;
+}
+
+function formatContrast(value: number): string {
+  return `${value.toFixed(2).replace(/0$/, '').replace('.', ',')}×`;
 }
 
 function requiredElement<ElementType extends HTMLElement>(id: string): ElementType {
