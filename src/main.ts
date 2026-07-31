@@ -484,9 +484,10 @@ function selectRecognitionMode(nextMode: RecognitionMode): void {
     return;
   }
 
-  renderer.setPreciseKeyHighlighting(true);
+  renderer.setPreciseKeyHighlighting(false);
 
   if (preciseAnalysisResult !== null) {
+    renderer.setPreciseKeyHighlighting(true);
     renderer.setAnalysisPreservingViewport(preciseAnalysisResult, audioPlayer.durationSeconds);
     setPhase(AnalysisPhase.Complete);
     updatePlaybackUi();
@@ -536,6 +537,7 @@ async function refineWithModel(): Promise<void> {
     preciseAnalysisResult = result;
     persistPreciseModelReadyHint();
     if (recognitionMode === RecognitionMode.Precise) {
+      renderer.setPreciseKeyHighlighting(true);
       renderer.setAnalysisPreservingViewport(result, audioPlayer.durationSeconds);
       setPhase(AnalysisPhase.Complete);
     } else {
