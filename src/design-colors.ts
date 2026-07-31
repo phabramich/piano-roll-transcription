@@ -8,4 +8,5 @@ export const DESIGN_COLORS = {
   keyActive: '#00ABB8',
   playhead: '#DD3FA3',
   playheadText: '#17131D',
+  waveform: '#B9B4C5',
 } as const;

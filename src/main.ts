@@ -4,6 +4,7 @@ import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-pla
 import { FastSpectrumClient, FastSpectrumClientError } from './fast-spectrum';
 import { PianoRollRenderer } from './piano-roll-renderer';
 import { PianoAudition } from './piano-audition';
+import { WaveformTimeline } from './waveform-timeline';
 import './style.css';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -63,7 +64,10 @@ app.innerHTML = `
           <div class="player__controls">
             <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести"><span aria-hidden="true">▶</span></button>
             <span class="player__time" id="current-time">0:00</span>
-            <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
+            <div class="waveform-timeline">
+              <canvas id="waveform" aria-hidden="true"></canvas>
+              <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
+            </div>
             <span class="player__time player__time--duration" id="duration-time">0:00</span>
           </div>
         </div>
@@ -110,6 +114,7 @@ const elements = {
     throw new Error('Piano stage is missing');
   })(),
   canvas: requiredElement<HTMLCanvasElement>('piano-roll'),
+  waveform: requiredElement<HTMLCanvasElement>('waveform'),
   playButton: requiredElement<HTMLButtonElement>('play-button'),
   timeline: requiredElement<HTMLInputElement>('timeline'),
   currentTime: requiredElement<HTMLElement>('current-time'),
@@ -122,6 +127,7 @@ const fastSpectrumClient = new FastSpectrumClient();
 const audioPlayer = new AudioPlayer();
 const pianoAudition = new PianoAudition();
 const renderer = new PianoRollRenderer(elements.canvas);
+const waveformTimeline = new WaveformTimeline(elements.waveform);
 let phase = AnalysisPhase.Idle;
 let analysisGeneration = 0;
 let animationFrameId: number | null = null;
@@ -350,6 +356,7 @@ window.addEventListener('beforeunload', () => {
   audioPlayer.dispose();
   pianoAudition.dispose();
   renderer.dispose();
+  waveformTimeline.dispose();
 });
 
 async function loadFile(file: File): Promise<void> {
@@ -361,6 +368,7 @@ async function loadFile(file: File): Promise<void> {
   fastSpectrumClient.cancel();
   audioPlayer.reset();
   renderer.clear();
+  waveformTimeline.clear();
   cancelAnimation();
   decodedSamples = null;
   fullFastSpectrumReady = false;
@@ -385,6 +393,7 @@ async function loadFile(file: File): Promise<void> {
     }
 
     decodedSamples = decoded.samples;
+    waveformTimeline.setSamples(decoded.samples, decoded.durationSeconds);
     elements.dropZone.hidden = true;
     setPhase(AnalysisPhase.FastAnalyzing);
     const fastResult = await fastSpectrumClient.analyze(decoded.samples, {
@@ -606,6 +615,7 @@ function updatePlaybackUi(): void {
   elements.currentTime.textContent = formatTime(currentTime);
   elements.durationTime.textContent = formatTime(audioPlayer.durationSeconds);
   elements.railDuration.textContent = formatTime(audioPlayer.durationSeconds);
+  waveformTimeline.setCurrentTime(currentTime);
   renderer.render(currentTime);
 }
 
