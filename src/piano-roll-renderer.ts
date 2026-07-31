@@ -16,6 +16,8 @@ const HOLD_DELAY_MS = 200;
 const DRAG_THRESHOLD_PX = 8;
 const KEY_ACTIVATION_THRESHOLD = 168;
 const MAX_ACTIVE_KEY_ALPHA = 0.8;
+const PRECISE_KEY_ACTIVATION_THRESHOLD = 96;
+const PRECISE_MAX_ACTIVE_KEY_ALPHA = 1;
 const DEFAULT_CONTRAST = 1.4;
 const MIN_CONTRAST = 0.7;
 const MAX_CONTRAST = 2.2;
@@ -67,6 +69,7 @@ export class PianoRollRenderer {
   private pitchPanRemainder = 0;
   private timeOffsetSeconds = 0;
   private follow = true;
+  private preciseKeyHighlighting = false;
   private pinchState: PinchState | null = null;
   private disposed = false;
 
@@ -108,6 +111,15 @@ export class PianoRollRenderer {
     this.render(this.currentTimeSeconds);
   }
 
+  public setAnalysisNotes(notes: AnalyzedNote[]): void {
+    if (this.disposed || this.result === null) {
+      return;
+    }
+    this.result = { ...this.result, notes };
+    this.noteIndex = createNoteIndex(notes);
+    this.render(this.currentTimeSeconds);
+  }
+
   public clear(): void {
     if (this.disposed) {
       return;
@@ -124,6 +136,14 @@ export class PianoRollRenderer {
       return;
     }
     this.contrast = clamp(value, MIN_CONTRAST, MAX_CONTRAST);
+    this.render(this.currentTimeSeconds);
+  }
+
+  public setPreciseKeyHighlighting(enabled: boolean): void {
+    if (this.disposed || this.preciseKeyHighlighting === enabled) {
+      return;
+    }
+    this.preciseKeyHighlighting = enabled;
     this.render(this.currentTimeSeconds);
   }
 
@@ -460,10 +480,14 @@ export class PianoRollRenderer {
       }
       const activation =
         result.frameProbabilities[frame * result.pitchCount + pitch];
-      if (activation < KEY_ACTIVATION_THRESHOLD) {
+      if (activation < this.keyActivationThreshold) {
         continue;
       }
-      const alpha = activeKeyAlpha(activation);
+      const alpha = activeKeyAlpha(
+        activation,
+        this.keyActivationThreshold,
+        this.maxActiveKeyAlpha,
+      );
       const x = this.pitchToX(midi, width);
       this.context.globalAlpha = alpha;
       this.context.fillRect(
@@ -519,20 +543,24 @@ export class PianoRollRenderer {
     const deltaPixels = normalizeWheelDelta(event.deltaY, event.deltaMode, rollHeight);
     if (event.ctrlKey || event.metaKey) {
       this.zoomTimeAt(
-        deltaPixels,
+        -deltaPixels,
         clamp((event.clientY - rect.top) / rollHeight, 0, 1),
       );
     } else if (event.altKey) {
       this.zoomPitchAt(
-        deltaPixels,
+        -deltaPixels,
         clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+      );
+    } else if (event.shiftKey) {
+      this.panPitch(
+        (deltaPixels / Math.max(1, rect.width)) * this.visiblePitchCount,
       );
     } else {
       const pitchDelta =
         normalizeWheelDelta(event.deltaX, event.deltaMode, rollHeight) /
         Math.max(1, rect.width);
       this.panPitch(pitchDelta * this.visiblePitchCount);
-      this.panTime((deltaPixels / rollHeight) * this.visibleSeconds);
+      this.panTime((-deltaPixels / rollHeight) * this.visibleSeconds);
     }
     this.render(this.currentTimeSeconds);
   };
@@ -873,6 +901,18 @@ export class PianoRollRenderer {
       ? MOBILE_KEYBOARD_HEIGHT
       : DESKTOP_KEYBOARD_HEIGHT;
   }
+
+  private get keyActivationThreshold(): number {
+    return this.preciseKeyHighlighting
+      ? PRECISE_KEY_ACTIVATION_THRESHOLD
+      : KEY_ACTIVATION_THRESHOLD;
+  }
+
+  private get maxActiveKeyAlpha(): number {
+    return this.preciseKeyHighlighting
+      ? PRECISE_MAX_ACTIVE_KEY_ALPHA
+      : MAX_ACTIVE_KEY_ALPHA;
+  }
 }
 
 function activationToAlpha(activation: number, contrast: number): number {
@@ -882,14 +922,17 @@ function activationToAlpha(activation: number, contrast: number): number {
   return adjusted ** (1 + contrast * 0.42);
 }
 
-function activeKeyAlpha(activation: number): number {
+function activeKeyAlpha(
+  activation: number,
+  threshold: number,
+  maximumAlpha: number,
+): number {
   const normalized = clamp(
-    (activation - KEY_ACTIVATION_THRESHOLD) /
-      (255 - KEY_ACTIVATION_THRESHOLD),
+    (activation - threshold) / (255 - threshold),
     0,
     1,
   );
-  return 0.3 + normalized * (MAX_ACTIVE_KEY_ALPHA - 0.3);
+  return 0.3 + normalized * (maximumAlpha - 0.3);
 }
 
 function normalizeWheelDelta(
