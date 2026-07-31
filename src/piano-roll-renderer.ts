@@ -14,7 +14,8 @@ const DEFAULT_PITCH_RANGE_INDEX = 2;
 const DEFAULT_LOW_MIDI = 36;
 const HOLD_DELAY_MS = 200;
 const DRAG_THRESHOLD_PX = 8;
-const KEY_ACTIVATION_THRESHOLD = 14;
+const KEY_ACTIVATION_THRESHOLD = 168;
+const MAX_ACTIVE_KEY_ALPHA = 0.8;
 const DEFAULT_CONTRAST = 1.4;
 const MIN_CONTRAST = 0.7;
 const MAX_CONTRAST = 2.2;
@@ -204,8 +205,8 @@ export class PianoRollRenderer {
       this.drawNoteOutlines(cssWidth, rollHeight);
       context.restore();
     }
+    this.drawPlaybackPosition(cssWidth, rollHeight);
     this.drawKeyboard(cssWidth, rollHeight, keyboardHeight);
-    this.drawPlayhead(cssWidth, rollHeight);
   }
 
   public dispose(): void {
@@ -431,7 +432,7 @@ export class PianoRollRenderer {
       result.frameCount - 1,
     );
     const columnWidth = width / this.visiblePitchCount;
-    this.context.fillStyle = DESIGN_COLORS.note;
+    this.context.fillStyle = DESIGN_COLORS.keyActive;
     for (let pitch = 0; pitch < result.pitchCount; pitch += 1) {
       const midi = FIRST_MIDI_NOTE + pitch;
       if (!this.isPitchVisible(midi) || isBlackKey(midi) !== black) {
@@ -442,9 +443,9 @@ export class PianoRollRenderer {
       if (activation < KEY_ACTIVATION_THRESHOLD) {
         continue;
       }
-      const alpha = activationToAlpha(activation, this.contrast);
+      const alpha = activeKeyAlpha(activation);
       const x = this.pitchToX(midi, width);
-      this.context.globalAlpha = 0.3 + alpha * 0.7;
+      this.context.globalAlpha = alpha;
       this.context.fillRect(
         x + (black ? columnWidth * 0.12 : 1),
         top + 1,
@@ -455,29 +456,62 @@ export class PianoRollRenderer {
     this.context.globalAlpha = 1;
   }
 
-  private drawPlayhead(width: number, rollHeight: number): void {
-    this.context.fillStyle = DESIGN_COLORS.playhead;
-    this.context.fillRect(0, Math.max(0, rollHeight - 2), width, 2);
+  private drawPlaybackPosition(width: number, rollHeight: number): void {
+    if (rollHeight <= 0) {
+      return;
+    }
+    const y = this.timeToY(this.currentTimeSeconds, rollHeight);
+    const lineHeight = Math.min(2, rollHeight);
+    const clampedY = clamp(
+      y,
+      lineHeight / 2,
+      rollHeight - lineHeight / 2,
+    );
+    const direction = y < 0 ? '↑' : y > rollHeight ? '↓' : '';
+    const label = `NOW ${formatPlaybackTime(this.currentTimeSeconds)}${direction}`;
+    const context = this.context;
+    context.save();
+    context.beginPath();
+    context.rect(0, 0, width, rollHeight);
+    context.clip();
+    context.fillStyle = DESIGN_COLORS.playhead;
+    context.fillRect(0, clampedY - lineHeight / 2, width, lineHeight);
+    if (rollHeight >= 18) {
+      context.font = '600 11px system-ui, sans-serif';
+      context.textBaseline = 'middle';
+      const labelWidth = Math.ceil(context.measureText(label).width) + 10;
+      if (width >= labelWidth + 12) {
+        const labelX = width - labelWidth - 6;
+        const labelY = clamp(clampedY, 9, rollHeight - 9);
+        context.fillRect(labelX, labelY - 8, labelWidth, 16);
+        context.fillStyle = DESIGN_COLORS.playheadText;
+        context.fillText(label, labelX + 5, labelY);
+      }
+    }
+    context.restore();
   }
 
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
     const rollHeight = Math.max(1, rect.height - this.getKeyboardHeight());
+    const deltaPixels = normalizeWheelDelta(event.deltaY, event.deltaMode, rollHeight);
     if (event.ctrlKey || event.metaKey) {
       this.zoomTimeAt(
-        event.deltaY,
+        deltaPixels,
         clamp((event.clientY - rect.top) / rollHeight, 0, 1),
       );
     } else if (event.altKey) {
       this.zoomPitchAt(
-        event.deltaY,
+        deltaPixels,
         clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
       );
     } else {
-      const pitchDelta = event.deltaX / Math.max(1, rect.width);
+      const pitchDelta =
+        normalizeWheelDelta(event.deltaX, event.deltaMode, rollHeight) /
+        Math.max(1, rect.width);
       this.panPitch(pitchDelta * this.visiblePitchCount);
-      this.panTime((event.deltaY / rollHeight) * this.visibleSeconds);
+      this.panTime((deltaPixels / rollHeight) * this.visibleSeconds);
     }
     this.render(this.currentTimeSeconds);
   };
@@ -667,11 +701,11 @@ export class PianoRollRenderer {
     this.render(this.currentTimeSeconds);
   }
 
-  private zoomTimeAt(delta: number, yRatio: number): void {
+  private zoomTimeAt(deltaPixels: number, yRatio: number): void {
     const anchor =
       this.anchorTimeSeconds + (1 - yRatio) * this.visibleSeconds;
     this.visibleSeconds = clamp(
-      this.visibleSeconds * (delta > 0 ? 1.12 : 0.89),
+      this.visibleSeconds * Math.exp(clamp(deltaPixels, -240, 240) * 0.0018),
       MIN_VISIBLE_SECONDS,
       MAX_VISIBLE_SECONDS,
     );
@@ -821,6 +855,37 @@ function activationToAlpha(activation: number, contrast: number): number {
   const floor = 0.05 + (contrast - MIN_CONTRAST) * 0.05;
   const adjusted = Math.max(0, (normalized - floor) / (1 - floor));
   return adjusted ** (1 + contrast * 0.42);
+}
+
+function activeKeyAlpha(activation: number): number {
+  const normalized = clamp(
+    (activation - KEY_ACTIVATION_THRESHOLD) /
+      (255 - KEY_ACTIVATION_THRESHOLD),
+    0,
+    1,
+  );
+  return 0.3 + normalized * (MAX_ACTIVE_KEY_ALPHA - 0.3);
+}
+
+function normalizeWheelDelta(
+  delta: number,
+  deltaMode: number,
+  rollHeight: number,
+): number {
+  if (deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return delta * 16;
+  }
+  if (deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return delta * rollHeight;
+  }
+  return delta;
+}
+
+function formatPlaybackTime(timeSeconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(timeSeconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
 function isBlackKey(midi: number): boolean {

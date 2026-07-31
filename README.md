@@ -1,4 +1,4 @@
-# SPECTRAL SCORE
+# pianorolltranscribe
 
 Локальное веб-приложение для просмотра предполагаемых нот в аудиозаписи.
 
@@ -18,8 +18,8 @@ npm run dev
 Собрать production-образ и запустить приложение на порту `8080`:
 
 ```bash
-docker build -t spectral-score .
-docker run --rm -p 8080:8080 spectral-score
+docker build -t pianorolltranscribe .
+docker run --rm -p 8080:8080 pianorolltranscribe
 ```
 
 После запуска откройте [http://localhost:8080](http://localhost:8080). Контейнер только раздаёт собранный клиент: аудио и анализ по-прежнему остаются в браузере.

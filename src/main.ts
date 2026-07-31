@@ -14,9 +14,9 @@ if (app === null) {
 app.innerHTML = `
   <main class="application">
     <header class="application__header">
-      <div class="application__brand" aria-label="Spectral Score">
-        <span class="application__mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <h1>SPECTRAL SCORE</h1>
+      <div class="application__brand" aria-label="pianorolltranscribe">
+        <span class="application__mark" aria-hidden="true"><span class="application__mark-keys"><i></i><i></i><i></i><i></i></span><span class="application__mark-note"></span></span>
+        <h1>pianorolltranscribe</h1>
       </div>
       <p class="application__privacy"><span aria-hidden="true">●</span> Локальная обработка</p>
     </header>
@@ -49,7 +49,7 @@ app.innerHTML = `
               <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
               <label class="contrast-control" for="contrast">
                 <span class="contrast-control__label">Контраст</span>
-                <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст спектра и клавиш" aria-valuetext="Контраст: 1,4">
+                <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст спектра" aria-valuetext="Контраст: 1,4">
                 <output class="contrast-control__value" id="contrast-value" for="contrast">1,4×</output>
               </label>
               <button class="button button--accent" id="refine-button" type="button" hidden>Уточнить ML</button>
