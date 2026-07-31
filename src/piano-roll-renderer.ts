@@ -111,12 +111,16 @@ export class PianoRollRenderer {
     this.render(this.currentTimeSeconds);
   }
 
-  public setAnalysisNotes(notes: AnalyzedNote[]): void {
-    if (this.disposed || this.result === null) {
+  public setAnalysisPreservingViewport(
+    result: AnalysisResult,
+    durationSeconds: number,
+  ): void {
+    if (this.disposed) {
       return;
     }
-    this.result = { ...this.result, notes };
-    this.noteIndex = createNoteIndex(notes);
+    this.result = result;
+    this.noteIndex = createNoteIndex(result.notes);
+    this.durationSeconds = Math.max(0, durationSeconds);
     this.render(this.currentTimeSeconds);
   }
 
