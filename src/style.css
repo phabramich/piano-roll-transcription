@@ -419,9 +419,14 @@ h1 {
 
 .player__rail-duration { flex: 0 0 auto; color: var(--ink); font-variant-numeric: tabular-nums; }
 
-.drop-zone:focus-visible, .button:focus-visible, .play-button:focus-visible, .piano-stage__button:focus-visible, #piano-roll:focus-visible {
+.drop-zone:focus-visible, .button:focus-visible, .play-button:focus-visible, .piano-stage__button:focus-visible {
   outline: 3px solid var(--blue);
   outline-offset: 3px;
+}
+
+#piano-roll:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: -3px;
 }
 
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; margin: -1px; clip: rect(0 0 0 0); overflow: hidden; white-space: nowrap; }

@@ -49,13 +49,13 @@ app.innerHTML = `
             <div class="player__actions">
               <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
               <label class="contrast-control" for="contrast">
-                <span class="contrast-control__label">Контраст</span>
-                <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст спектра" aria-valuetext="Контраст: 1,4">
+                <span class="contrast-control__label">Контраст нот</span>
+                <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст нот" aria-valuetext="Контраст: 1,4">
                 <output class="contrast-control__value" id="contrast-value" for="contrast">1,4×</output>
               </label>
               <div class="recognition-mode" id="recognition-mode" role="radiogroup" aria-label="Режим распознавания" hidden>
-                <button class="button recognition-mode__option recognition-mode__option--selected" id="instant-mode-button" type="button" role="radio" aria-checked="true">Быстро</button>
-                <button class="button recognition-mode__option" id="precise-mode-button" type="button" role="radio" aria-checked="false">Точнее</button>
+                <button class="button recognition-mode__option recognition-mode__option--selected" id="instant-mode-button" type="button" role="radio" aria-checked="true" tabindex="0">Быстро</button>
+                <button class="button recognition-mode__option" id="precise-mode-button" type="button" role="radio" aria-checked="false" tabindex="-1">Точнее</button>
                 <p class="recognition-help" id="recognition-mode-hint"></p>
               </div>
               <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить аудиофайл" title="Заменить аудиофайл"><span aria-hidden="true">↗</span><span class="button__label">Заменить</span></button>
@@ -729,6 +729,8 @@ function updateRecognitionModeUi(): void {
   const canUseModes = fullFastSpectrumReady && fastAnalysisResult !== null;
   elements.instantModeButton.setAttribute('aria-checked', String(isInstant));
   elements.preciseModeButton.setAttribute('aria-checked', String(!isInstant));
+  elements.instantModeButton.tabIndex = isInstant ? 0 : -1;
+  elements.preciseModeButton.tabIndex = isInstant ? -1 : 0;
   elements.instantModeButton.classList.toggle('recognition-mode__option--selected', isInstant);
   elements.preciseModeButton.classList.toggle('recognition-mode__option--selected', !isInstant);
   elements.instantModeButton.disabled = !canUseModes;

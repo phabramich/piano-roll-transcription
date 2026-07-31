@@ -181,12 +181,15 @@ export class PianoRollRenderer {
     if (this.disposed) {
       return;
     }
+    const previousAnchorTimeSeconds = this.anchorTimeSeconds;
     this.currentTimeSeconds = Number.isFinite(currentTimeSeconds)
       ? clamp(currentTimeSeconds, 0, this.durationSeconds)
       : 0;
     if (this.follow) {
       this.timeOffsetSeconds = 0;
     } else {
+      this.timeOffsetSeconds =
+        previousAnchorTimeSeconds - this.currentTimeSeconds;
       this.clampTimeOffset();
     }
     const { cssWidth, cssHeight, ratio } = this.syncCanvasSize();
@@ -780,10 +783,7 @@ export class PianoRollRenderer {
       0,
       this.durationSeconds,
     );
-    const viewportAnchor = this.anchorTimeSeconds;
     this.setFollowing(false, false);
-    this.timeOffsetSeconds = viewportAnchor - targetTime;
-    this.clampTimeOffsetFor(targetTime);
     this.onSeek?.(targetTime);
   }
 
