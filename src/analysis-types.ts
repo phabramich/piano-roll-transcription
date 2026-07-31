@@ -9,6 +9,11 @@ export enum AnalysisPhase {
   Failed = 'failed',
 }
 
+export enum RecognitionMode {
+  Instant = 'instant',
+  Precise = 'precise',
+}
+
 export enum WorkerMessageType {
   Analyze = 'analyze',
   Progress = 'progress',

@@ -1,5 +1,5 @@
 import { AnalysisClient, AnalysisClientError } from './analysis-client';
-import { AnalysisErrorCode, AnalysisPhase } from './analysis-types';
+import { AnalysisErrorCode, AnalysisPhase, type AnalysisResult, RecognitionMode } from './analysis-types';
 import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-player';
 import { FastSpectrumClient, FastSpectrumClientError } from './fast-spectrum';
 import { PianoRollRenderer } from './piano-roll-renderer';
@@ -52,7 +52,11 @@ app.innerHTML = `
                 <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст спектра" aria-valuetext="Контраст: 1,4">
                 <output class="contrast-control__value" id="contrast-value" for="contrast">1,4×</output>
               </label>
-              <button class="button button--accent" id="refine-button" type="button" hidden>Уточнить ML</button>
+              <div class="recognition-mode" id="recognition-mode" role="radiogroup" aria-label="Режим распознавания" hidden>
+                <button class="button button--accent" id="instant-mode-button" type="button" role="radio" aria-checked="true">Быстро</button>
+                <button class="button button--secondary" id="precise-mode-button" type="button" role="radio" aria-checked="false">Точнее</button>
+                <p id="recognition-mode-hint"></p>
+              </div>
               <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить аудиофайл" title="Заменить аудиофайл"><span aria-hidden="true">↗</span><span class="button__label">Заменить</span></button>
             </div>
           </div>
@@ -91,7 +95,10 @@ const elements = {
   player: requiredElement<HTMLElement>('player'),
   fileName: requiredElement<HTMLElement>('file-name'),
   analysisStatus: requiredElement<HTMLElement>('analysis-status'),
-  refineButton: requiredElement<HTMLButtonElement>('refine-button'),
+  recognitionMode: requiredElement<HTMLElement>('recognition-mode'),
+  instantModeButton: requiredElement<HTMLButtonElement>('instant-mode-button'),
+  preciseModeButton: requiredElement<HTMLButtonElement>('precise-mode-button'),
+  recognitionModeHint: requiredElement<HTMLElement>('recognition-mode-hint'),
   replaceButton: requiredElement<HTMLButtonElement>('replace-button'),
   contrast: requiredElement<HTMLInputElement>('contrast'),
   contrastValue: requiredElement<HTMLOutputElement>('contrast-value'),
@@ -122,6 +129,12 @@ let scrubbing = false;
 let disposed = false;
 let decodedSamples: Float32Array | null = null;
 let fullFastSpectrumReady = false;
+let recognitionMode = RecognitionMode.Instant;
+let fastAnalysisResult: AnalysisResult | null = null;
+let preciseAnalysisResult: AnalysisResult | null = null;
+let preciseAnalysisInProgress = false;
+let preciseAnalysisProgress = 0;
+let preciseModelReadyOnDevice = readPreciseModelReadyHint();
 
 audioPlayer.onStateChange = () => {
   if (disposed) {
@@ -268,8 +281,12 @@ elements.replaceButton.addEventListener('click', () => {
   }
 });
 
-elements.refineButton.addEventListener('click', () => {
-  void refineWithModel();
+elements.instantModeButton.addEventListener('click', () => {
+  selectRecognitionMode(RecognitionMode.Instant);
+});
+
+elements.preciseModeButton.addEventListener('click', () => {
+  selectRecognitionMode(RecognitionMode.Precise);
 });
 
 elements.contrast.addEventListener('input', () => {
@@ -328,6 +345,11 @@ async function loadFile(file: File): Promise<void> {
   cancelAnimation();
   decodedSamples = null;
   fullFastSpectrumReady = false;
+  fastAnalysisResult = null;
+  preciseAnalysisResult = null;
+  preciseAnalysisInProgress = false;
+  preciseAnalysisProgress = 0;
+  recognitionMode = RecognitionMode.Instant;
   elements.fileName.textContent = file.name;
   elements.player.hidden = true;
   elements.dropZone.hidden = false;
@@ -359,7 +381,7 @@ async function loadFile(file: File): Promise<void> {
         elements.railDuration.textContent = formatTime(decoded.durationSeconds);
         elements.player.hidden = false;
         setPhase(AnalysisPhase.PreviewReady);
-        elements.status.textContent = 'Предварительный спектр готов. Строим полную ленту.';
+        elements.status.textContent = 'Первые ноты готовы. Продолжаем подготовку.';
         updatePlaybackUi();
       },
     });
@@ -369,7 +391,8 @@ async function loadFile(file: File): Promise<void> {
     hasFullFastSpectrum = true;
     fullFastSpectrumReady = true;
 
-    renderer.setAnalysis(fastResult, decoded.durationSeconds);
+    fastAnalysisResult = fastResult;
+    renderer.setAnalysis(fastAnalysisResult, decoded.durationSeconds);
     elements.timeline.max = String(decoded.durationSeconds);
     elements.timeline.value = '0';
     elements.durationTime.textContent = formatTime(decoded.durationSeconds);
@@ -383,12 +406,12 @@ async function loadFile(file: File): Promise<void> {
     }
     if (isPlaybackReady() && hasFullFastSpectrum) {
       setPhase(AnalysisPhase.FastReady);
-      elements.status.textContent = 'Быстрый спектр готов. Уточнение нот моделью недоступно.';
+      elements.status.textContent = 'Быстрый вариант готов. Точный вариант сейчас недоступен.';
       return;
     }
     if (isPlaybackReady() && hasFastPreview) {
       setPhase(AnalysisPhase.PreviewReady);
-      elements.status.textContent = 'Предварительный спектр готов. Полная лента недоступна.';
+      elements.status.textContent = 'Первые ноты готовы. Полная лента сейчас недоступна.';
       return;
     }
     elements.dropZone.hidden = false;
@@ -397,25 +420,58 @@ async function loadFile(file: File): Promise<void> {
   }
 }
 
+function selectRecognitionMode(nextMode: RecognitionMode): void {
+  if (disposed || !fullFastSpectrumReady || fastAnalysisResult === null) {
+    return;
+  }
+
+  recognitionMode = nextMode;
+  if (nextMode === RecognitionMode.Instant) {
+    renderer.setAnalysis(fastAnalysisResult, audioPlayer.durationSeconds);
+    setPhase(AnalysisPhase.FastReady);
+    updatePlaybackUi();
+    return;
+  }
+
+  if (preciseAnalysisResult !== null) {
+    renderer.setAnalysis(preciseAnalysisResult, audioPlayer.durationSeconds);
+    setPhase(AnalysisPhase.Complete);
+    updatePlaybackUi();
+    return;
+  }
+
+  if (preciseAnalysisInProgress) {
+    setPhase(AnalysisPhase.Refining, preciseAnalysisProgress);
+    return;
+  }
+
+  void refineWithModel();
+}
+
 async function refineWithModel(): Promise<void> {
   const samples = decodedSamples;
   if (
     disposed ||
     !fullFastSpectrumReady ||
     samples === null ||
-    phase === AnalysisPhase.Refining ||
-    phase === AnalysisPhase.Complete
+    preciseAnalysisInProgress
   ) {
     return;
   }
 
   const generation = analysisGeneration;
+  preciseAnalysisInProgress = true;
+  preciseAnalysisProgress = 0;
   clearError();
   setPhase(AnalysisPhase.Refining, 0);
   try {
     const result = await analysisClient.analyze(samples.slice(), {
       onProgress: progress => {
         if (generation === analysisGeneration) {
+          preciseAnalysisProgress = progress;
+          if (recognitionMode !== RecognitionMode.Precise) {
+            return;
+          }
           setPhase(AnalysisPhase.Refining, progress);
         }
       },
@@ -423,16 +479,28 @@ async function refineWithModel(): Promise<void> {
     if (disposed || generation !== analysisGeneration) {
       return;
     }
-    renderer.setAnalysis(result, audioPlayer.durationSeconds);
-    setPhase(AnalysisPhase.Complete);
+    preciseAnalysisInProgress = false;
+    preciseAnalysisResult = result;
+    persistPreciseModelReadyHint();
+    if (recognitionMode === RecognitionMode.Precise) {
+      renderer.setAnalysis(result, audioPlayer.durationSeconds);
+      setPhase(AnalysisPhase.Complete);
+    } else {
+      setPhase(AnalysisPhase.FastReady);
+    }
     updatePlaybackUi();
   } catch (error) {
     if (disposed || generation !== analysisGeneration || isCancelled(error)) {
       return;
     }
+    preciseAnalysisInProgress = false;
+    recognitionMode = RecognitionMode.Instant;
+    if (fastAnalysisResult !== null) {
+      renderer.setAnalysis(fastAnalysisResult, audioPlayer.durationSeconds);
+    }
     setPhase(AnalysisPhase.FastReady);
-    showError(`${toErrorMessage(error)} Быстрый спектр сохранён — можно повторить уточнение.`);
-    elements.status.textContent = 'Уточнение ML не завершилось. Быстрый спектр сохранён.';
+    showError('Не удалось подготовить точные ноты. Показан быстрый вариант — можно продолжать слушать запись.');
+    elements.status.textContent = 'Точный вариант не готов. Быстрый вариант сохранён.';
   }
 }
 
@@ -475,42 +543,36 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     elements.dropDescription.textContent = 'Перетащите сюда или выберите с устройства';
     elements.status.textContent = 'Можно выбрать аудиофайл.';
   } else if (phase === AnalysisPhase.Loading) {
-    elements.dropTitle.textContent = 'Декодируем аудио…';
-    elements.dropDescription.textContent = 'Подготавливаем дорожку для локального анализа';
-    elements.status.textContent = 'Декодируем аудио.';
+    elements.dropTitle.textContent = 'Открываем аудио…';
+    elements.dropDescription.textContent = 'Подготавливаем дорожку';
+    elements.status.textContent = 'Открываем аудио.';
   } else if (phase === AnalysisPhase.FastAnalyzing) {
-    elements.dropTitle.textContent = 'Строим быстрый спектр…';
-    elements.dropDescription.textContent = 'Сопоставляем частоты с 88 клавишами пианино';
-    elements.status.textContent = 'Строим быстрый спектр.';
+    elements.dropTitle.textContent = 'Подготавливаем ноты…';
+    elements.dropDescription.textContent = 'Это займёт немного времени';
+    elements.status.textContent = 'Подготавливаем ноты.';
   } else if (phase === AnalysisPhase.PreviewReady) {
-    elements.analysisStatus.textContent = 'Предварительный спектр готов';
-    elements.refineButton.hidden = true;
-    elements.refineButton.disabled = true;
-    elements.status.textContent = 'Предварительный спектр готов. Строим полную ленту.';
+    elements.analysisStatus.textContent = 'Первые ноты готовы';
+    elements.recognitionMode.hidden = true;
+    elements.status.textContent = 'Первые ноты готовы. Продолжаем подготовку.';
   } else if (phase === AnalysisPhase.FastReady) {
-    elements.analysisStatus.textContent = 'Быстрый спектр готов';
-    elements.refineButton.hidden = !fullFastSpectrumReady;
-    elements.refineButton.disabled = !fullFastSpectrumReady;
-    elements.refineButton.textContent = 'Уточнить ML';
-    elements.status.textContent = 'Быстрый спектр готов. Можно воспроизводить и перематывать.';
+    elements.analysisStatus.textContent = 'Быстрый вариант готов';
+    elements.recognitionMode.hidden = !fullFastSpectrumReady;
+    elements.status.textContent = 'Быстрый вариант готов. Можно воспроизводить и перематывать.';
   } else if (phase === AnalysisPhase.Refining) {
     const percentage = Math.round(progress * 100);
-    elements.analysisStatus.textContent = `Уточняем ML: ${percentage}%`;
-    elements.refineButton.hidden = false;
-    elements.refineButton.disabled = true;
-    elements.refineButton.textContent = 'Уточняем ML…';
-    elements.status.textContent = `Быстрый спектр готов. Уточняем ноты моделью: ${percentage}%.`;
+    elements.analysisStatus.textContent = `Распознаём ноты: ${percentage}%`;
+    elements.recognitionMode.hidden = false;
+    elements.status.textContent = `Распознаём ноты: ${percentage}%.`;
   } else if (phase === AnalysisPhase.Complete) {
-    elements.analysisStatus.textContent = 'Уточнение готово';
-    elements.refineButton.hidden = false;
-    elements.refineButton.disabled = true;
-    elements.refineButton.textContent = 'Уточнение готово';
-    elements.status.textContent = 'Анализ завершён. Партитура готова.';
+    elements.analysisStatus.textContent = 'Точный вариант готов';
+    elements.recognitionMode.hidden = false;
+    elements.status.textContent = 'Точный вариант готов. Партитура готова.';
   } else {
     elements.dropTitle.textContent = 'Не удалось обработать файл';
     elements.dropDescription.textContent = 'Попробуйте выбрать другой аудиофайл';
     elements.status.textContent = 'Не удалось обработать файл.';
   }
+  updateRecognitionModeUi();
 }
 
 function updatePlaybackUi(): void {
@@ -608,18 +670,18 @@ function toErrorMessage(error: unknown): string {
   }
   if (error instanceof AnalysisClientError) {
     if (error.code === AnalysisErrorCode.ModelLoadFailed) {
-      return 'Не удалось загрузить локальную модель анализа.';
+      return 'Не удалось подготовить точные ноты.';
     }
     if (error.code === AnalysisErrorCode.BackendUnavailable) {
-      return 'Браузер не смог запустить вычислительный модуль.';
+      return 'Браузер не смог продолжить распознавание.';
     }
     if (error.code === AnalysisErrorCode.WorkerFailed) {
-      return 'Рабочий процесс анализа остановился.';
+      return 'Распознавание неожиданно остановилось.';
     }
     if (error.code === AnalysisErrorCode.InvalidAudio) {
-      return 'Аудиоданные пусты или не подходят для анализа.';
+      return 'Запись пуста или не подходит для распознавания.';
     }
-    return 'Анализ аудио не завершился.';
+    return 'Распознавание не завершилось.';
   }
   return 'Произошла непредвиденная ошибка. Попробуйте ещё раз.';
 }
@@ -631,6 +693,35 @@ function formatTime(seconds: number): string {
 
 function formatContrast(value: number): string {
   return `${value.toFixed(2).replace(/0$/, '').replace('.', ',')}×`;
+}
+
+function updateRecognitionModeUi(): void {
+  const isInstant = recognitionMode === RecognitionMode.Instant;
+  const canUseModes = fullFastSpectrumReady && fastAnalysisResult !== null;
+  elements.instantModeButton.setAttribute('aria-checked', String(isInstant));
+  elements.preciseModeButton.setAttribute('aria-checked', String(!isInstant));
+  elements.instantModeButton.disabled = !canUseModes;
+  elements.preciseModeButton.disabled = !canUseModes;
+  elements.recognitionModeHint.textContent = preciseModelReadyOnDevice
+    ? 'Точный анализ уже использовался на этом устройстве — повторная загрузка обычно не нужна.'
+    : 'Первый точный анализ может занять несколько минут и скачает модель распознавания — около 0,9 МБ.';
+}
+
+function readPreciseModelReadyHint(): boolean {
+  try {
+    return localStorage['pianorolltranscribe.precise-model-ready'] === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistPreciseModelReadyHint(): void {
+  preciseModelReadyOnDevice = true;
+  try {
+    localStorage['pianorolltranscribe.precise-model-ready'] = '1';
+  } catch {
+    return;
+  }
 }
 
 function requiredElement<ElementType extends HTMLElement>(id: string): ElementType {
