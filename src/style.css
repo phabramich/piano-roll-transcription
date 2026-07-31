@@ -172,7 +172,7 @@ h1 {
   background: var(--surface);
 }
 
-.player__deck { border-bottom: 1px solid var(--line); background: var(--surface); }
+.player__deck { border-bottom: 1px solid var(--line); border-radius: 13px 13px 0 0; background: var(--surface); }
 
 .player__toolbar {
   display: flex;
@@ -409,6 +409,7 @@ h1 {
   gap: 12px;
   padding: 7px 12px;
   border-top: 1px solid var(--line);
+  border-radius: 0 0 13px 13px;
   background: var(--surface-muted);
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -437,6 +438,8 @@ h1 {
   .drop-zone__meta { bottom: 12px; left: 16px; font-size: 8px; }
   .error-message { align-items: flex-start; flex-direction: column; }
   .player { border-radius: 12px; }
+  .player__deck { border-radius: 11px 11px 0 0; }
+  .player__rail { border-radius: 0 0 11px 11px; }
   .player__toolbar { align-items: flex-start; flex-direction: column; gap: 8px; padding: 10px 10px 8px; }
   .player__file { width: 100%; }
   .player__actions { width: 100%; justify-content: flex-start; }
