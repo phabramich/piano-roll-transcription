@@ -166,7 +166,7 @@ h1 {
 
 .player {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line-strong);
   border-radius: 14px;
   background: var(--surface);
@@ -302,6 +302,16 @@ h1 {
   background: var(--surface-muted);
 }
 
+.waveform-timeline:focus-within::after {
+  position: absolute;
+  z-index: 2;
+  inset: 2px;
+  border: 2px solid var(--blue-dark);
+  border-radius: 6px;
+  content: "";
+  pointer-events: none;
+}
+
 .waveform-timeline canvas { display: block; width: 100%; height: 100%; }
 
 #timeline {
@@ -323,7 +333,7 @@ h1 {
   appearance: none;
   border: 2px solid var(--magenta);
   border-radius: 7px;
-  background: rgb(255 255 255 / 90%);
+  background: var(--surface);
 }
 
 #timeline::-moz-range-track { height: 100%; background: transparent; }
@@ -332,7 +342,7 @@ h1 {
   height: 42px;
   border: 2px solid var(--magenta);
   border-radius: 7px;
-  background: rgb(255 255 255 / 90%);
+  background: var(--surface);
 }
 
 .piano-stage {
@@ -344,7 +354,7 @@ h1 {
   background: var(--surface);
 }
 
-.piano-stage[data-following="true"] { border: 2px solid var(--magenta); }
+.piano-stage[data-following="true"] { outline: 2px solid var(--magenta); outline-offset: 0; }
 
 .piano-stage__toolbar {
   position: absolute;
@@ -377,7 +387,7 @@ h1 {
 
 .piano-stage__button:hover { border-color: var(--blue); background: var(--blue-soft); color: var(--blue-dark); }
 .piano-stage__button:active { transform: scale(.96); }
-.piano-stage[data-following="true"] #follow-button, .piano-stage[data-following="true"] #follow-button:hover { border-color: var(--magenta); background: var(--magenta); color: white; }
+.piano-stage[data-following="true"] #follow-button, .piano-stage[data-following="true"] #follow-button:hover { border-color: var(--magenta); background: var(--magenta); color: #17131d; }
 
 #piano-roll {
   display: block;
@@ -408,7 +418,7 @@ h1 {
 
 .player__rail-duration { flex: 0 0 auto; color: var(--ink); font-variant-numeric: tabular-nums; }
 
-.drop-zone:focus-visible, .button:focus-visible, .play-button:focus-visible, .piano-stage__button:focus-visible, #timeline:focus-visible, #piano-roll:focus-visible {
+.drop-zone:focus-visible, .button:focus-visible, .play-button:focus-visible, .piano-stage__button:focus-visible, #piano-roll:focus-visible {
   outline: 3px solid var(--blue);
   outline-offset: 3px;
 }
