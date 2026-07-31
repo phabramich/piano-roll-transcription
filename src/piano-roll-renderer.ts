@@ -71,6 +71,7 @@ export class PianoRollRenderer {
   private disposed = false;
 
   public onSeek: ((seconds: number) => void) | null = null;
+  public onFollowChange: ((following: boolean) => void) | null = null;
   public onPianoKeyPrepare: (() => void) | null = null;
   public onPianoKeyStart: ((midi: number) => void) | null = null;
   public onPianoKeyStop: (() => void) | null = null;
@@ -130,6 +131,7 @@ export class PianoRollRenderer {
     if (this.disposed || direction === 0) {
       return;
     }
+    this.setFollowing(false, false);
     this.visibleSeconds = clamp(
       this.visibleSeconds * (direction > 0 ? 0.8 : 1.25),
       MIN_VISIBLE_SECONDS,
@@ -142,6 +144,7 @@ export class PianoRollRenderer {
     if (this.disposed) {
       return;
     }
+    this.setFollowing(false, false);
     const center = this.lowMidi + this.visiblePitchCount / 2;
     this.pitchRangeIndex = (this.pitchRangeIndex + 1) % PITCH_RANGES.length;
     this.lowMidi = clampLowMidi(
@@ -152,13 +155,11 @@ export class PianoRollRenderer {
     this.render(this.currentTimeSeconds);
   }
 
-  public followPlayback(): void {
+  public toggleFollow(): void {
     if (this.disposed) {
       return;
     }
-    this.follow = true;
-    this.timeOffsetSeconds = 0;
-    this.render(this.currentTimeSeconds);
+    this.setFollowing(!this.follow);
   }
 
   public resetViewport(): void {
@@ -169,8 +170,7 @@ export class PianoRollRenderer {
     this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
     this.lowMidi = DEFAULT_LOW_MIDI;
     this.pitchPanRemainder = 0;
-    this.follow = true;
-    this.timeOffsetSeconds = 0;
+    this.setFollowing(true, false);
     if (this.result !== null) {
       this.centerPitchRange(this.result.notes);
     }
@@ -235,6 +235,23 @@ export class PianoRollRenderer {
 
   private get anchorTimeSeconds(): number {
     return this.currentTimeSeconds + this.timeOffsetSeconds;
+  }
+
+  private setFollowing(next: boolean, shouldRender = true): void {
+    if (this.disposed) {
+      return;
+    }
+    const changed = this.follow !== next;
+    this.follow = next;
+    if (next) {
+      this.timeOffsetSeconds = 0;
+    }
+    if (changed) {
+      this.onFollowChange?.(next);
+    }
+    if (shouldRender) {
+      this.render(this.currentTimeSeconds);
+    }
   }
 
   private syncCanvasSize(): {
@@ -493,6 +510,7 @@ export class PianoRollRenderer {
 
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault();
+    this.setFollowing(false, false);
     const rect = this.canvas.getBoundingClientRect();
     const rollHeight = Math.max(1, rect.height - this.getKeyboardHeight());
     const deltaPixels = normalizeWheelDelta(event.deltaY, event.deltaMode, rollHeight);
@@ -573,6 +591,7 @@ export class PianoRollRenderer {
     if (!state.moved) {
       return;
     }
+    this.setFollowing(false, false);
     const rect = this.canvas.getBoundingClientRect();
     const rollHeight = Math.max(1, rect.height - this.getKeyboardHeight());
     this.panPitch(
@@ -637,6 +656,7 @@ export class PianoRollRenderer {
       second.auditioning = false;
       this.onPianoKeyStop?.();
     }
+    this.setFollowing(false, false);
     this.pinchState = {
       distanceX: Math.max(20, Math.abs(second.x - first.x)),
       distanceY: Math.max(20, Math.abs(second.y - first.y)),
@@ -696,7 +716,6 @@ export class PianoRollRenderer {
       this.currentTimeSeconds -
       (1 - clamp((centerY - rect.top) / rollHeight, 0, 1)) *
         this.visibleSeconds;
-    this.follow = false;
     this.clampTimeOffset();
     this.render(this.currentTimeSeconds);
   }
@@ -711,7 +730,6 @@ export class PianoRollRenderer {
     );
     this.timeOffsetSeconds =
       anchor - this.currentTimeSeconds - (1 - yRatio) * this.visibleSeconds;
-    this.follow = false;
     this.clampTimeOffset();
   }
 
@@ -735,7 +753,6 @@ export class PianoRollRenderer {
       return;
     }
     this.timeOffsetSeconds += deltaSeconds;
-    this.follow = false;
     this.clampTimeOffset();
   }
 
@@ -758,9 +775,16 @@ export class PianoRollRenderer {
     if (y < 0 || y > rollHeight) {
       return;
     }
-    const time =
-      this.anchorTimeSeconds + (1 - y / rollHeight) * this.visibleSeconds;
-    this.onSeek?.(clamp(time, 0, this.durationSeconds));
+    const targetTime = clamp(
+      this.anchorTimeSeconds + (1 - y / rollHeight) * this.visibleSeconds,
+      0,
+      this.durationSeconds,
+    );
+    const viewportAnchor = this.anchorTimeSeconds;
+    this.setFollowing(false, false);
+    this.timeOffsetSeconds = viewportAnchor - targetTime;
+    this.clampTimeOffsetFor(targetTime);
+    this.onSeek?.(targetTime);
   }
 
   private cancelPointers(): void {
@@ -806,12 +830,13 @@ export class PianoRollRenderer {
   }
 
   private clampTimeOffset(): void {
+    this.clampTimeOffsetFor(this.currentTimeSeconds);
+  }
+
+  private clampTimeOffsetFor(timeSeconds: number): void {
     this.timeOffsetSeconds =
-      clamp(
-        this.currentTimeSeconds + this.timeOffsetSeconds,
-        0,
-        this.durationSeconds,
-      ) - this.currentTimeSeconds;
+      clamp(timeSeconds + this.timeOffsetSeconds, 0, this.durationSeconds) -
+      timeSeconds;
   }
 
   private timeToY(timeSeconds: number, rollHeight: number): number {

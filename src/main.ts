@@ -63,12 +63,12 @@ app.innerHTML = `
             <span class="player__time player__time--duration" id="duration-time">0:00</span>
           </div>
         </div>
-        <section class="piano-stage" aria-label="Навигация по партитуре">
+        <section class="piano-stage" data-following="true" aria-label="Навигация по партитуре">
           <div class="piano-stage__toolbar" role="toolbar" aria-label="Масштаб и диапазон партитуры">
             <button class="piano-stage__button" id="zoom-out-button" type="button" aria-label="Уменьшить временной масштаб" title="Уменьшить временной масштаб">−</button>
             <button class="piano-stage__button" id="zoom-in-button" type="button" aria-label="Увеличить временной масштаб" title="Увеличить временной масштаб">+</button>
             <button class="piano-stage__button piano-stage__button--wide" id="pitch-range-button" type="button" aria-label="Изменить видимый диапазон клавиш" title="Изменить видимый диапазон клавиш">Клавиши</button>
-            <button class="piano-stage__button piano-stage__button--wide" id="follow-button" type="button" aria-label="Вернуться к текущей позиции" title="Вернуться к текущей позиции">К позиции</button>
+            <button class="piano-stage__button piano-stage__button--wide" id="follow-button" type="button" aria-label="Следование включено" aria-pressed="true" title="Следование включено">Следование включено</button>
           </div>
           <canvas id="piano-roll" tabindex="0" aria-label="Падающая партитура. Перетаскивайте для обзора, нажимайте для перехода к позиции и удерживайте, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
         </section>
@@ -99,6 +99,9 @@ const elements = {
   zoomInButton: requiredElement<HTMLButtonElement>('zoom-in-button'),
   pitchRangeButton: requiredElement<HTMLButtonElement>('pitch-range-button'),
   followButton: requiredElement<HTMLButtonElement>('follow-button'),
+  pianoStage: requiredElement<HTMLElement>('piano-roll').closest<HTMLElement>('.piano-stage') ?? (() => {
+    throw new Error('Piano stage is missing');
+  })(),
   canvas: requiredElement<HTMLCanvasElement>('piano-roll'),
   playButton: requiredElement<HTMLButtonElement>('play-button'),
   timeline: requiredElement<HTMLInputElement>('timeline'),
@@ -135,6 +138,11 @@ renderer.onSeek = seconds => {
   audioPlayer.seek(seconds);
   updatePlaybackUi();
   requestAnimation();
+};
+renderer.onFollowChange = following => {
+  if (!disposed) {
+    updateFollowUi(following);
+  }
 };
 renderer.onPianoKeyPrepare = () => {
   if (!disposed) {
@@ -293,7 +301,7 @@ elements.pitchRangeButton.addEventListener('click', () => {
 
 elements.followButton.addEventListener('click', () => {
   if (!disposed) {
-    renderer.followPlayback();
+    renderer.toggleFollow();
   }
 });
 
@@ -518,6 +526,15 @@ function updatePlaybackUi(): void {
   elements.durationTime.textContent = formatTime(audioPlayer.durationSeconds);
   elements.railDuration.textContent = formatTime(audioPlayer.durationSeconds);
   renderer.render(currentTime);
+}
+
+function updateFollowUi(following: boolean): void {
+  const copy = following ? 'Следование включено' : 'Следовать';
+  elements.followButton.textContent = copy;
+  elements.followButton.setAttribute('aria-label', copy);
+  elements.followButton.title = copy;
+  elements.followButton.setAttribute('aria-pressed', String(following));
+  elements.pianoStage.dataset.following = String(following);
 }
 
 function isPlaybackReady(): boolean {
