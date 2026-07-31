@@ -285,15 +285,62 @@ h1 {
 
 #timeline { width: 100%; height: 14px; margin: 0; accent-color: var(--blue); cursor: ew-resize; }
 
+.piano-stage {
+  position: relative;
+  isolation: isolate;
+}
+
+.piano-stage__toolbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  gap: 5px;
+  padding: 5px;
+  border: 1px solid rgb(220 226 236 / 84%);
+  border-radius: 9px;
+  background: rgb(255 255 255 / 76%);
+  box-shadow: 0 6px 18px rgb(27 42 72 / 8%);
+  backdrop-filter: blur(10px);
+}
+
+.piano-stage__button {
+  min-width: 28px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 7px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 720;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+}
+
+.piano-stage__button:hover {
+  border-color: #d6e0ff;
+  background: var(--blue-soft);
+  color: var(--blue-dark);
+}
+
+.piano-stage__button:active { transform: scale(.96); }
+
 #piano-roll {
   display: block;
   width: 100%;
   height: min(56vw, 640px);
   min-height: 420px;
   background: var(--surface);
-  cursor: crosshair;
+  cursor: grab;
   outline: none;
+  touch-action: none;
 }
+
+#piano-roll:active { cursor: grabbing; }
 
 .player__rail {
   position: absolute;
@@ -317,7 +364,7 @@ h1 {
 
 .player__rail-duration { color: var(--ink); font-variant-numeric: tabular-nums; }
 
-.drop-zone:focus-visible, .button:focus-visible, .play-button:focus-visible, #timeline:focus-visible, #piano-roll:focus-visible {
+.drop-zone:focus-visible, .button:focus-visible, .play-button:focus-visible, .piano-stage__button:focus-visible, #timeline:focus-visible, #piano-roll:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--blue) 55%, white);
   outline-offset: 3px;
 }
@@ -342,7 +389,15 @@ h1 {
   .contrast-control { grid-template-columns: max-content 66px max-content; }
   .contrast-control input { width: 66px; }
   .player__controls { grid-template-columns: 30px max-content minmax(0, 1fr) max-content; gap: 8px; padding: 5px 10px 9px; }
-  #piano-roll { height: 62vh; min-height: 56vh; }
+  .piano-stage__toolbar {
+    right: 8px;
+    left: 8px;
+    max-width: calc(100% - 16px);
+    overflow-x: auto;
+  }
+  .piano-stage__button { min-width: 38px; min-height: 38px; }
+  .piano-stage__button--wide { padding-inline: 10px; }
+  #piano-roll { height: 68vh; min-height: 0; }
   .player__rail { right: 8px; bottom: 8px; max-width: calc(100% - 16px); font-size: 8px; }
 }
 

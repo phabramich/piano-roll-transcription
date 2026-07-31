@@ -63,8 +63,16 @@ app.innerHTML = `
             <span class="player__time player__time--duration" id="duration-time">0:00</span>
           </div>
         </div>
-        <canvas id="piano-roll" tabindex="0" aria-label="Спектральная партитура. Кликните по ленте, чтобы перемотать. Удерживайте клавишу или строку спектра, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
-        <div class="player__rail"><span>Клик — перемотка&nbsp;&nbsp;·&nbsp;&nbsp;Удержание — нота</span><span class="player__rail-duration" id="rail-duration">0:00</span></div>
+        <section class="piano-stage" aria-label="Навигация по партитуре">
+          <div class="piano-stage__toolbar" role="toolbar" aria-label="Масштаб и диапазон партитуры">
+            <button class="piano-stage__button" id="zoom-out-button" type="button" aria-label="Уменьшить временной масштаб" title="Уменьшить временной масштаб">−</button>
+            <button class="piano-stage__button" id="zoom-in-button" type="button" aria-label="Увеличить временной масштаб" title="Увеличить временной масштаб">+</button>
+            <button class="piano-stage__button piano-stage__button--wide" id="pitch-range-button" type="button" aria-label="Изменить видимый диапазон клавиш" title="Изменить видимый диапазон клавиш">Клавиши</button>
+            <button class="piano-stage__button piano-stage__button--wide" id="follow-button" type="button" aria-label="Вернуться к текущей позиции" title="Вернуться к текущей позиции">К позиции</button>
+          </div>
+          <canvas id="piano-roll" tabindex="0" aria-label="Падающая партитура. Перетаскивайте для обзора, нажимайте для перехода к позиции и удерживайте, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
+        </section>
+        <div class="player__rail"><span>Drag — обзор · Tap — позиция · Hold — нота</span><span class="player__rail-duration" id="rail-duration">0:00</span></div>
       </section>
     </section>
   </main>
@@ -87,6 +95,10 @@ const elements = {
   replaceButton: requiredElement<HTMLButtonElement>('replace-button'),
   contrast: requiredElement<HTMLInputElement>('contrast'),
   contrastValue: requiredElement<HTMLOutputElement>('contrast-value'),
+  zoomOutButton: requiredElement<HTMLButtonElement>('zoom-out-button'),
+  zoomInButton: requiredElement<HTMLButtonElement>('zoom-in-button'),
+  pitchRangeButton: requiredElement<HTMLButtonElement>('pitch-range-button'),
+  followButton: requiredElement<HTMLButtonElement>('follow-button'),
   canvas: requiredElement<HTMLCanvasElement>('piano-roll'),
   playButton: requiredElement<HTMLButtonElement>('play-button'),
   timeline: requiredElement<HTMLInputElement>('timeline'),
@@ -259,6 +271,30 @@ elements.contrast.addEventListener('input', () => {
   elements.contrastValue.value = text;
   elements.contrastValue.textContent = text;
   elements.contrast.setAttribute('aria-valuetext', `Контраст: ${text}`);
+});
+
+elements.zoomOutButton.addEventListener('click', () => {
+  if (!disposed) {
+    renderer.zoomTime(-1);
+  }
+});
+
+elements.zoomInButton.addEventListener('click', () => {
+  if (!disposed) {
+    renderer.zoomTime(1);
+  }
+});
+
+elements.pitchRangeButton.addEventListener('click', () => {
+  if (!disposed) {
+    renderer.cyclePitchRange();
+  }
+});
+
+elements.followButton.addEventListener('click', () => {
+  if (!disposed) {
+    renderer.followPlayback();
+  }
 });
 
 window.addEventListener('beforeunload', () => {

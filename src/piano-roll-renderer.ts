@@ -3,54 +3,55 @@ import { DESIGN_COLORS } from './design-colors';
 
 const FIRST_MIDI_NOTE = 21;
 const LAST_MIDI_NOTE = 108;
-const DESKTOP_PIANO_KEYBOARD_WIDTH = 72;
-const MOBILE_PIANO_KEYBOARD_WIDTH = 52;
+const DESKTOP_KEYBOARD_HEIGHT = 96;
+const MOBILE_KEYBOARD_HEIGHT = 78;
 const MOBILE_BREAKPOINT_PX = 700;
-const VISIBLE_SECONDS = 12;
-const PLAYHEAD_POSITION = 0.36;
-const NOTES_PER_INDEX_BLOCK = 64;
-const TILE_SECONDS = 4;
-const TILE_CACHE_LIMIT = 4;
+const MIN_VISIBLE_SECONDS = 2;
+const MAX_VISIBLE_SECONDS = 20;
+const DEFAULT_VISIBLE_SECONDS = 12;
+const PITCH_RANGES = [36, 48, 60, 84] as const;
+const DEFAULT_PITCH_RANGE_INDEX = 2;
+const DEFAULT_LOW_MIDI = 36;
 const HOLD_DELAY_MS = 200;
-const POINTER_MOVE_CANCEL_DISTANCE = 8;
+const DRAG_THRESHOLD_PX = 8;
 const KEY_ACTIVATION_THRESHOLD = 14;
 const DEFAULT_CONTRAST = 1.4;
 const MIN_CONTRAST = 0.7;
 const MAX_CONTRAST = 2.2;
-
-type TileCanvas = HTMLCanvasElement | OffscreenCanvas;
-type TileContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+const NOTES_PER_INDEX_BLOCK = 64;
 
 interface NoteIndexBlock {
   notes: AnalyzedNote[];
   maximumEndTimeSeconds: number;
 }
 
-interface TemporalTile {
-  canvas: TileCanvas;
-  cssWidth: number;
-}
-
-enum CanvasPointerRegion {
-  Keyboard,
-  Grid,
-}
-
-interface PianoPointerGesture {
-  pointerId: number;
-  midi: number;
-  region: CanvasPointerRegion;
+interface PointerState {
+  id: number;
   startX: number;
   startY: number;
+  x: number;
+  y: number;
+  midi: number;
   holdTimeoutId: number;
-  isAuditioning: boolean;
-  shouldSuppressCanvasClick: boolean;
+  auditioning: boolean;
+  moved: boolean;
+}
+
+interface PinchState {
+  distanceX: number;
+  distanceY: number;
+  visibleSeconds: number;
+  visiblePitchCount: number;
+  lowMidi: number;
+  timeOffsetSeconds: number;
+  centerX: number;
+  centerY: number;
 }
 
 export class PianoRollRenderer {
   private readonly context: CanvasRenderingContext2D;
   private readonly resizeObserver: ResizeObserver;
-  private readonly tileCache = new Map<number, TemporalTile>();
+  private readonly pointers = new Map<number, PointerState>();
   private result: AnalysisResult | null = null;
   private noteIndex: NoteIndexBlock[] = [];
   private durationSeconds = 0;
@@ -59,9 +60,13 @@ export class PianoRollRenderer {
   private renderedCssHeight = 0;
   private renderedPixelRatio = 0;
   private contrast = DEFAULT_CONTRAST;
-  private pianoPointerGesture: PianoPointerGesture | null = null;
-  private suppressClickTimeoutId: number | null = null;
-  private suppressNextCanvasClick = false;
+  private visibleSeconds = DEFAULT_VISIBLE_SECONDS;
+  private pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
+  private lowMidi = DEFAULT_LOW_MIDI;
+  private pitchPanRemainder = 0;
+  private timeOffsetSeconds = 0;
+  private follow = true;
+  private pinchState: PinchState | null = null;
   private disposed = false;
 
   public onSeek: ((seconds: number) => void) | null = null;
@@ -74,18 +79,16 @@ export class PianoRollRenderer {
     if (context === null) {
       throw new Error('Canvas 2D is not available');
     }
-
     this.context = context;
     this.resizeObserver = new ResizeObserver(() =>
       this.render(this.currentTimeSeconds),
     );
     this.resizeObserver.observe(canvas);
-    canvas.addEventListener('click', this.handleClick);
+    canvas.addEventListener('wheel', this.handleWheel, { passive: false });
     canvas.addEventListener('pointerdown', this.handlePointerDown);
     canvas.addEventListener('pointermove', this.handlePointerMove);
     canvas.addEventListener('pointerup', this.handlePointerEnd);
     canvas.addEventListener('pointercancel', this.handlePointerEnd);
-    canvas.addEventListener('pointerleave', this.handlePointerLeave);
     canvas.addEventListener('lostpointercapture', this.handlePointerEnd);
     window.addEventListener('blur', this.handleWindowBlur);
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
@@ -98,8 +101,8 @@ export class PianoRollRenderer {
     }
     this.result = result;
     this.noteIndex = createNoteIndex(result.notes);
-    this.durationSeconds = durationSeconds;
-    this.invalidateTileCache();
+    this.durationSeconds = Math.max(0, durationSeconds);
+    this.centerPitchRange(result.notes);
     this.render(this.currentTimeSeconds);
   }
 
@@ -111,20 +114,65 @@ export class PianoRollRenderer {
     this.noteIndex = [];
     this.durationSeconds = 0;
     this.currentTimeSeconds = 0;
-    this.invalidateTileCache();
-    this.render(0);
+    this.resetViewport();
   }
 
   public setContrast(value: number): void {
     if (this.disposed || !Number.isFinite(value)) {
       return;
     }
-    const nextContrast = Math.min(MAX_CONTRAST, Math.max(MIN_CONTRAST, value));
-    if (Math.abs(this.contrast - nextContrast) < 0.001) {
+    this.contrast = clamp(value, MIN_CONTRAST, MAX_CONTRAST);
+    this.render(this.currentTimeSeconds);
+  }
+
+  public zoomTime(direction: number): void {
+    if (this.disposed || direction === 0) {
       return;
     }
-    this.contrast = nextContrast;
-    this.invalidateTileCache();
+    this.visibleSeconds = clamp(
+      this.visibleSeconds * (direction > 0 ? 0.8 : 1.25),
+      MIN_VISIBLE_SECONDS,
+      MAX_VISIBLE_SECONDS,
+    );
+    this.render(this.currentTimeSeconds);
+  }
+
+  public cyclePitchRange(): void {
+    if (this.disposed) {
+      return;
+    }
+    const center = this.lowMidi + this.visiblePitchCount / 2;
+    this.pitchRangeIndex = (this.pitchRangeIndex + 1) % PITCH_RANGES.length;
+    this.lowMidi = clampLowMidi(
+      Math.round(center - this.visiblePitchCount / 2),
+      this.visiblePitchCount,
+    );
+    this.pitchPanRemainder = 0;
+    this.render(this.currentTimeSeconds);
+  }
+
+  public followPlayback(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.follow = true;
+    this.timeOffsetSeconds = 0;
+    this.render(this.currentTimeSeconds);
+  }
+
+  public resetViewport(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.visibleSeconds = DEFAULT_VISIBLE_SECONDS;
+    this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
+    this.lowMidi = DEFAULT_LOW_MIDI;
+    this.pitchPanRemainder = 0;
+    this.follow = true;
+    this.timeOffsetSeconds = 0;
+    if (this.result !== null) {
+      this.centerPitchRange(this.result.notes);
+    }
     this.render(this.currentTimeSeconds);
   }
 
@@ -132,67 +180,60 @@ export class PianoRollRenderer {
     if (this.disposed) {
       return;
     }
-    this.currentTimeSeconds = currentTimeSeconds;
+    this.currentTimeSeconds = Number.isFinite(currentTimeSeconds)
+      ? clamp(currentTimeSeconds, 0, this.durationSeconds)
+      : 0;
+    if (this.follow) {
+      this.timeOffsetSeconds = 0;
+    } else {
+      this.clampTimeOffset();
+    }
     const { cssWidth, cssHeight, ratio } = this.syncCanvasSize();
+    const keyboardHeight = this.getKeyboardHeight();
+    const rollHeight = Math.max(0, cssHeight - keyboardHeight);
     const context = this.context;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, cssWidth, cssHeight);
-
-    const gridLeft = this.getKeyboardWidth();
-    const gridWidth = Math.max(0, cssWidth - gridLeft);
-    const rowHeight = cssHeight / 88;
-    const windowStart = currentTimeSeconds - VISIBLE_SECONDS * PLAYHEAD_POSITION;
-    const windowEnd = windowStart + VISIBLE_SECONDS;
-
-    this.drawKeyboard(rowHeight, cssHeight);
-    this.drawGrid(gridLeft, gridWidth, rowHeight, cssHeight, windowStart);
-
-    if (this.result !== null && gridWidth > 0) {
+    this.drawGrid(cssWidth, rollHeight);
+    if (this.result !== null && rollHeight > 0) {
       context.save();
       context.beginPath();
-      context.rect(gridLeft, 0, gridWidth, cssHeight);
+      context.rect(0, 0, cssWidth, rollHeight);
       context.clip();
-      this.drawFrameTiles(
-        gridLeft,
-        gridWidth,
-        cssHeight,
-        ratio,
-        windowStart,
-        windowEnd,
-      );
-      this.drawNoteOutlines(
-        gridLeft,
-        gridWidth,
-        rowHeight,
-        windowStart,
-        windowEnd,
-      );
+      this.drawFrameProbabilities(cssWidth, rollHeight);
+      this.drawNoteOutlines(cssWidth, rollHeight);
       context.restore();
-      this.drawActiveKeys(rowHeight);
     }
-
-    const playheadX = gridLeft + gridWidth * PLAYHEAD_POSITION;
-    context.fillStyle = DESIGN_COLORS.playhead;
-    context.fillRect(playheadX - 1, 0, 2, cssHeight);
+    this.drawKeyboard(cssWidth, rollHeight, keyboardHeight);
+    this.drawPlayhead(cssWidth, rollHeight);
   }
 
   public dispose(): void {
+    if (this.disposed) {
+      return;
+    }
     this.disposed = true;
     this.resizeObserver.disconnect();
-    this.canvas.removeEventListener('click', this.handleClick);
+    this.canvas.removeEventListener('wheel', this.handleWheel);
     this.canvas.removeEventListener('pointerdown', this.handlePointerDown);
     this.canvas.removeEventListener('pointermove', this.handlePointerMove);
     this.canvas.removeEventListener('pointerup', this.handlePointerEnd);
     this.canvas.removeEventListener('pointercancel', this.handlePointerEnd);
-    this.canvas.removeEventListener('pointerleave', this.handlePointerLeave);
-    this.canvas.removeEventListener('lostpointercapture', this.handlePointerEnd);
+    this.canvas.removeEventListener(
+      'lostpointercapture',
+      this.handlePointerEnd,
+    );
     window.removeEventListener('blur', this.handleWindowBlur);
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);
-    this.endPianoPointerGesture();
-    if (this.suppressClickTimeoutId !== null) {
-      window.clearTimeout(this.suppressClickTimeoutId);
-    }
-    this.invalidateTileCache();
+    this.cancelPointers();
+  }
+
+  private get visiblePitchCount(): number {
+    return PITCH_RANGES[this.pitchRangeIndex];
+  }
+
+  private get anchorTimeSeconds(): number {
+    return this.currentTimeSeconds + this.timeOffsetSeconds;
   }
 
   private syncCanvasSize(): {
@@ -204,246 +245,112 @@ export class PianoRollRenderer {
     const ratio = window.devicePixelRatio || 1;
     const targetWidth = Math.max(1, Math.floor(rect.width * ratio));
     const targetHeight = Math.max(1, Math.floor(rect.height * ratio));
-    const changed =
+    if (
       targetWidth !== this.canvas.width ||
       targetHeight !== this.canvas.height ||
       rect.width !== this.renderedCssWidth ||
       rect.height !== this.renderedCssHeight ||
-      ratio !== this.renderedPixelRatio;
-
-    if (changed) {
+      ratio !== this.renderedPixelRatio
+    ) {
       this.canvas.width = targetWidth;
       this.canvas.height = targetHeight;
       this.renderedCssWidth = rect.width;
       this.renderedCssHeight = rect.height;
       this.renderedPixelRatio = ratio;
-      this.invalidateTileCache();
     }
-
     return { cssWidth: rect.width, cssHeight: rect.height, ratio };
   }
 
-  private invalidateTileCache(): void {
-    this.tileCache.clear();
-  }
-
-  private drawKeyboard(rowHeight: number, height: number): void {
-    const context = this.context;
-    const keyboardWidth = this.getKeyboardWidth();
-    for (let row = 0; row < 88; row += 1) {
-      const midi = LAST_MIDI_NOTE - row;
-      const y = row * rowHeight;
-      context.fillStyle = isBlackKey(midi)
-        ? DESIGN_COLORS.text
-        : DESIGN_COLORS.surface;
-      context.fillRect(0, y, keyboardWidth, rowHeight + 0.5);
-      context.strokeStyle = DESIGN_COLORS.grid;
-      context.strokeRect(0, y, keyboardWidth, rowHeight);
-
-      if (midi % 12 === 0 || midi === FIRST_MIDI_NOTE) {
-        context.fillStyle = isBlackKey(midi)
-          ? DESIGN_COLORS.surface
-          : DESIGN_COLORS.text;
-        context.font = '10px Inter, system-ui, sans-serif';
-        context.textBaseline = 'middle';
-        const label =
-          midi === FIRST_MIDI_NOTE
-            ? 'A0'
-            : `C${Math.floor(midi / 12) - 1}`;
-        context.fillText(label, 5, y + rowHeight / 2);
-      }
-    }
-
-    context.strokeStyle = DESIGN_COLORS.text;
-    context.strokeRect(0, 0, keyboardWidth, height);
-  }
-
-  private drawGrid(
-    gridLeft: number,
-    gridWidth: number,
-    rowHeight: number,
-    height: number,
-    windowStart: number,
-  ): void {
+  private drawGrid(width: number, rollHeight: number): void {
     const context = this.context;
     context.fillStyle = DESIGN_COLORS.surface;
-    context.fillRect(gridLeft, 0, gridWidth, height);
-    context.save();
-    context.globalAlpha = 0.42;
-    context.fillStyle = DESIGN_COLORS.grid;
-    const beforeTrackWidth = Math.max(
-      0,
-      Math.min(
-        gridWidth,
-        ((0 - windowStart) / VISIBLE_SECONDS) * gridWidth,
-      ),
-    );
-    const afterTrackX = Math.max(
-      0,
-      Math.min(
-        gridWidth,
-        ((this.durationSeconds - windowStart) / VISIBLE_SECONDS) * gridWidth,
-      ),
-    );
-    context.fillRect(gridLeft, 0, beforeTrackWidth, height);
-    context.fillRect(
-      gridLeft + afterTrackX,
-      0,
-      gridWidth - afterTrackX,
-      height,
-    );
-    context.restore();
-
+    context.fillRect(0, 0, width, rollHeight);
+    const columnWidth = width / this.visiblePitchCount;
     context.strokeStyle = DESIGN_COLORS.grid;
     context.lineWidth = 1;
-    for (let row = 0; row <= 88; row += 1) {
-      const y = Math.round(row * rowHeight) + 0.5;
+    for (let pitch = 0; pitch <= this.visiblePitchCount; pitch += 1) {
+      const x = Math.round(pitch * columnWidth) + 0.5;
       context.beginPath();
-      context.moveTo(gridLeft, y);
-      context.lineTo(gridLeft + gridWidth, y);
+      context.moveTo(x, 0);
+      context.lineTo(x, rollHeight);
       context.stroke();
     }
+    const start = this.anchorTimeSeconds;
     for (
-      let second = Math.ceil(windowStart);
-      second <= windowStart + VISIBLE_SECONDS;
+      let second = Math.ceil(start);
+      second <= start + this.visibleSeconds;
       second += 1
     ) {
-      const x =
-        gridLeft +
-        ((second - windowStart) / VISIBLE_SECONDS) * gridWidth;
+      const y = this.timeToY(second, rollHeight);
       context.beginPath();
-      context.moveTo(x + 0.5, 0);
-      context.lineTo(x + 0.5, height);
+      context.moveTo(0, Math.round(y) + 0.5);
+      context.lineTo(width, Math.round(y) + 0.5);
       context.stroke();
     }
+    context.save();
+    context.globalAlpha = 0.35;
+    context.fillStyle = DESIGN_COLORS.grid;
+    const beforeTrackY = this.timeToY(0, rollHeight);
+    if (beforeTrackY < rollHeight) {
+      context.fillRect(0, Math.max(0, beforeTrackY), width, rollHeight);
+    }
+    const afterTrackY = this.timeToY(this.durationSeconds, rollHeight);
+    if (afterTrackY > 0) {
+      context.fillRect(0, 0, width, Math.min(rollHeight, afterTrackY));
+    }
+    context.restore();
   }
 
-  private drawFrameTiles(
-    gridLeft: number,
-    gridWidth: number,
-    cssHeight: number,
-    ratio: number,
-    windowStart: number,
-    windowEnd: number,
-  ): void {
-    const visibleStart = Math.max(0, windowStart);
-    const visibleEnd = Math.min(this.durationSeconds, windowEnd);
-    if (visibleEnd <= visibleStart) {
+  private drawFrameProbabilities(width: number, rollHeight: number): void {
+    const result = this.result;
+    if (result === null || result.frameCount === 0) {
       return;
     }
-
-    const firstTile = Math.floor(visibleStart / TILE_SECONDS);
-    const lastTile = Math.floor(
-      Math.max(visibleStart, visibleEnd - 0.000001) / TILE_SECONDS,
+    const windowStart = this.anchorTimeSeconds;
+    const windowEnd = windowStart + this.visibleSeconds;
+    const firstFrame = Math.max(
+      0,
+      lowerBound(result.frameTimestamps, windowStart) - 1,
     );
-    for (let tileIndex = firstTile; tileIndex <= lastTile; tileIndex += 1) {
-      const tile = this.getTile(
-        tileIndex,
-        gridWidth,
-        cssHeight,
-        ratio,
-      );
-      const tileStart = tileIndex * TILE_SECONDS;
-      const x =
-        gridLeft +
-        ((tileStart - windowStart) / VISIBLE_SECONDS) * gridWidth;
-      this.context.drawImage(
-        tile.canvas,
-        x,
-        0,
-        tile.cssWidth,
-        cssHeight,
-      );
-    }
-  }
-
-  private getTile(
-    tileIndex: number,
-    gridWidth: number,
-    cssHeight: number,
-    ratio: number,
-  ): TemporalTile {
-    const cached = this.tileCache.get(tileIndex);
-    if (cached !== undefined) {
-      this.tileCache.delete(tileIndex);
-      this.tileCache.set(tileIndex, cached);
-      return cached;
-    }
-
-    const tile = this.createTile(
-      tileIndex,
-      gridWidth,
-      cssHeight,
-      ratio,
-    );
-    this.tileCache.set(tileIndex, tile);
-    if (this.tileCache.size > TILE_CACHE_LIMIT) {
-      const oldestTile = this.tileCache.keys().next().value;
-      if (oldestTile !== undefined) {
-        this.tileCache.delete(oldestTile);
-      }
-    }
-    return tile;
-  }
-
-  private createTile(
-    tileIndex: number,
-    gridWidth: number,
-    cssHeight: number,
-    ratio: number,
-  ): TemporalTile {
-    const result = this.result;
-    const cssWidth = (gridWidth / VISIBLE_SECONDS) * TILE_SECONDS;
-    const width = Math.max(1, Math.ceil(cssWidth * ratio));
-    const height = Math.max(1, Math.ceil(cssHeight * ratio));
-    const canvas = createTileCanvas(width, height);
-    const context = getTileContext(canvas);
-    context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    context.clearRect(0, 0, cssWidth, cssHeight);
-
-    if (result === null) {
-      return { canvas, cssWidth };
-    }
-
-    const tileStart = tileIndex * TILE_SECONDS;
-    const tileEnd = tileStart + TILE_SECONDS;
-    const firstFrame = lowerBound(result.frameTimestamps, tileStart);
-    const lastFrame = lowerBound(result.frameTimestamps, tileEnd);
-    const rowHeight = cssHeight / 88;
-    const pixelsPerSecond = cssWidth / TILE_SECONDS;
-    context.fillStyle = DESIGN_COLORS.note;
-
+    const lastFrame = lowerBound(result.frameTimestamps, windowEnd);
+    const columnWidth = width / this.visiblePitchCount;
+    this.context.fillStyle = DESIGN_COLORS.note;
     for (let frame = firstFrame; frame < lastFrame; frame += 1) {
-      const x = (result.frameTimestamps[frame] - tileStart) * pixelsPerSecond;
-      const frameWidth = Math.max(
-        1,
-        pixelsPerSecond * frameDuration(result, frame),
-      );
+      const frameStart = result.frameTimestamps[frame];
+      const frameEnd = frameStart + frameDuration(result, frame);
+      const yTop = this.timeToY(frameEnd, rollHeight);
+      const yBottom = this.timeToY(frameStart, rollHeight);
       for (let pitch = 0; pitch < result.pitchCount; pitch += 1) {
+        const midi = FIRST_MIDI_NOTE + pitch;
+        if (!this.isPitchVisible(midi)) {
+          continue;
+        }
         const activation =
           result.frameProbabilities[frame * result.pitchCount + pitch];
         if (activation === 0) {
           continue;
         }
-        const row = result.pitchCount - 1 - pitch;
-        context.globalAlpha = activationToAlpha(activation, this.contrast);
-        context.fillRect(x, row * rowHeight, frameWidth, rowHeight);
+        this.context.globalAlpha = activationToAlpha(
+          activation,
+          this.contrast,
+        );
+        this.context.fillRect(
+          this.pitchToX(midi, width),
+          yTop,
+          Math.max(1, columnWidth),
+          Math.max(1, yBottom - yTop),
+        );
       }
     }
-    context.globalAlpha = 1;
-
-    return { canvas, cssWidth };
+    this.context.globalAlpha = 1;
   }
 
-  private drawNoteOutlines(
-    gridLeft: number,
-    gridWidth: number,
-    rowHeight: number,
-    windowStart: number,
-    windowEnd: number,
-  ): void {
+  private drawNoteOutlines(width: number, rollHeight: number): void {
+    const windowStart = this.anchorTimeSeconds;
+    const windowEnd = windowStart + this.visibleSeconds;
+    const columnWidth = width / this.visiblePitchCount;
     this.context.strokeStyle = DESIGN_COLORS.note;
-    this.context.lineWidth = 1;
+    this.context.lineWidth = 1.25;
     for (const block of this.noteIndex) {
       if (block.notes[0].startTimeSeconds > windowEnd) {
         return;
@@ -455,253 +362,465 @@ export class PianoRollRenderer {
         if (note.startTimeSeconds > windowEnd) {
           return;
         }
-        if (note.endTimeSeconds < windowStart) {
+        if (
+          note.endTimeSeconds < windowStart ||
+          !this.isPitchVisible(note.pitchMidi)
+        ) {
           continue;
         }
-        const row = LAST_MIDI_NOTE - note.pitchMidi;
-        if (row < 0 || row >= 88) {
-          continue;
-        }
-        const x =
-          gridLeft +
-          ((note.startTimeSeconds - windowStart) / VISIBLE_SECONDS) *
-            gridWidth;
-        const width =
-          ((note.endTimeSeconds - note.startTimeSeconds) / VISIBLE_SECONDS) *
-          gridWidth;
+        const yTop = this.timeToY(note.endTimeSeconds, rollHeight);
+        const yBottom = this.timeToY(note.startTimeSeconds, rollHeight);
         this.context.strokeRect(
-          x,
-          row * rowHeight,
-          Math.max(1, width),
-          rowHeight,
+          this.pitchToX(note.pitchMidi, width) + 0.5,
+          yTop,
+          Math.max(1, columnWidth - 1),
+          Math.max(1, yBottom - yTop),
         );
       }
     }
   }
 
-  private drawActiveKeys(rowHeight: number): void {
+  private drawKeyboard(
+    width: number,
+    top: number,
+    keyboardHeight: number,
+  ): void {
+    const context = this.context;
+    const columnWidth = width / this.visiblePitchCount;
+    context.fillStyle = DESIGN_COLORS.surface;
+    context.fillRect(0, top, width, keyboardHeight);
+    for (let index = 0; index < this.visiblePitchCount; index += 1) {
+      const midi = this.lowMidi + index;
+      if (isBlackKey(midi)) {
+        continue;
+      }
+      const x = index * columnWidth;
+      context.fillStyle = DESIGN_COLORS.surface;
+      context.fillRect(x, top, columnWidth + 0.5, keyboardHeight);
+      context.strokeStyle = DESIGN_COLORS.grid;
+      context.strokeRect(x, top, columnWidth, keyboardHeight);
+    }
+    this.drawActiveKeys(width, top, keyboardHeight, false);
+    for (let index = 0; index < this.visiblePitchCount; index += 1) {
+      const midi = this.lowMidi + index;
+      if (!isBlackKey(midi)) {
+        continue;
+      }
+      const x = index * columnWidth + columnWidth * 0.12;
+      context.fillStyle = DESIGN_COLORS.text;
+      context.fillRect(x, top, columnWidth * 0.76, keyboardHeight * 0.62);
+    }
+    this.drawActiveKeys(width, top, keyboardHeight, true);
+    context.strokeStyle = DESIGN_COLORS.text;
+    context.strokeRect(0, top, width, keyboardHeight);
+  }
+
+  private drawActiveKeys(
+    width: number,
+    top: number,
+    keyboardHeight: number,
+    black: boolean,
+  ): void {
     const result = this.result;
     if (result === null || result.frameCount === 0) {
       return;
     }
-    const frame = Math.max(
+    const frame = clamp(
+      lowerBound(result.frameTimestamps, this.currentTimeSeconds) - 1,
       0,
-      Math.min(
-        result.frameCount - 1,
-        lowerBound(result.frameTimestamps, this.currentTimeSeconds) - 1,
-      ),
+      result.frameCount - 1,
     );
+    const columnWidth = width / this.visiblePitchCount;
     this.context.fillStyle = DESIGN_COLORS.note;
-    this.context.save();
-    const keyboardWidth = this.getKeyboardWidth();
-    this.context.globalAlpha = 0.82;
     for (let pitch = 0; pitch < result.pitchCount; pitch += 1) {
-      const activation = result.frameProbabilities[
-        frame * result.pitchCount + pitch
-      ];
+      const midi = FIRST_MIDI_NOTE + pitch;
+      if (!this.isPitchVisible(midi) || isBlackKey(midi) !== black) {
+        continue;
+      }
+      const activation =
+        result.frameProbabilities[frame * result.pitchCount + pitch];
       if (activation < KEY_ACTIVATION_THRESHOLD) {
         continue;
       }
-      const row = result.pitchCount - 1 - pitch;
       const alpha = activationToAlpha(activation, this.contrast);
-      if (alpha === 0) {
-        continue;
-      }
-      this.context.globalAlpha = 0.22 + alpha * 0.78;
+      const x = this.pitchToX(midi, width);
+      this.context.globalAlpha = 0.3 + alpha * 0.7;
       this.context.fillRect(
-        1,
-        row * rowHeight + 1,
-        keyboardWidth - 2,
-        Math.max(1, rowHeight - 2),
-      );
-      this.context.globalAlpha = 0.75 + alpha * 0.25;
-      this.context.lineWidth = 1.5;
-      this.context.strokeStyle = DESIGN_COLORS.text;
-      this.context.strokeRect(
-        1,
-        row * rowHeight + 1,
-        keyboardWidth - 2,
-        Math.max(1, rowHeight - 2),
+        x + (black ? columnWidth * 0.12 : 1),
+        top + 1,
+        black ? columnWidth * 0.76 : Math.max(1, columnWidth - 2),
+        (black ? keyboardHeight * 0.62 : keyboardHeight) - 2,
       );
     }
-    this.context.restore();
+    this.context.globalAlpha = 1;
   }
 
-  private readonly handleClick = (event: MouseEvent): void => {
-    if (this.suppressNextCanvasClick) {
-      this.suppressNextCanvasClick = false;
-      return;
-    }
+  private drawPlayhead(width: number, rollHeight: number): void {
+    this.context.fillStyle = DESIGN_COLORS.playhead;
+    this.context.fillRect(0, Math.max(0, rollHeight - 2), width, 2);
+  }
+
+  private readonly handleWheel = (event: WheelEvent): void => {
+    event.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
-    const keyboardWidth = this.getKeyboardWidth();
-    if (event.clientX < rect.left + keyboardWidth) {
-      return;
+    const rollHeight = Math.max(1, rect.height - this.getKeyboardHeight());
+    if (event.ctrlKey || event.metaKey) {
+      this.zoomTimeAt(
+        event.deltaY,
+        clamp((event.clientY - rect.top) / rollHeight, 0, 1),
+      );
+    } else if (event.altKey) {
+      this.zoomPitchAt(
+        event.deltaY,
+        clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+      );
+    } else {
+      const pitchDelta = event.deltaX / Math.max(1, rect.width);
+      this.panPitch(pitchDelta * this.visiblePitchCount);
+      this.panTime((event.deltaY / rollHeight) * this.visibleSeconds);
     }
-    const x = event.clientX - rect.left - keyboardWidth;
-    const width = Math.max(1, rect.width - keyboardWidth);
-    const windowStart =
-      this.currentTimeSeconds - VISIBLE_SECONDS * PLAYHEAD_POSITION;
-    this.onSeek?.(
-      Math.max(
-        0,
-        Math.min(
-          this.durationSeconds,
-          windowStart + (x / width) * VISIBLE_SECONDS,
-        ),
-      ),
-    );
+    this.render(this.currentTimeSeconds);
   };
 
   private readonly handlePointerDown = (event: PointerEvent): void => {
+    event.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
-    const rowHeight = rect.height / 88;
-    const row = Math.floor((event.clientY - rect.top) / rowHeight);
-    if (row < 0 || row >= 88) {
-      return;
-    }
-
-    this.endPianoPointerGesture(true);
     this.canvas.setPointerCapture(event.pointerId);
     this.onPianoKeyPrepare?.();
-    const midi = LAST_MIDI_NOTE - row;
-    const region =
-      event.clientX < rect.left + this.getKeyboardWidth()
-        ? CanvasPointerRegion.Keyboard
-        : CanvasPointerRegion.Grid;
-    const holdTimeoutId = window.setTimeout(() => {
-      const gesture = this.pianoPointerGesture;
-      if (gesture === null || gesture.pointerId !== event.pointerId) {
-        return;
-      }
-      gesture.isAuditioning = true;
-      gesture.shouldSuppressCanvasClick = true;
-      this.onPianoKeyStart?.(gesture.midi);
-    }, HOLD_DELAY_MS);
-    this.pianoPointerGesture = {
-      pointerId: event.pointerId,
-      midi,
-      region,
+    const state: PointerState = {
+      id: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      holdTimeoutId,
-      isAuditioning: false,
-      shouldSuppressCanvasClick: false,
+      x: event.clientX,
+      y: event.clientY,
+      midi: this.clientXToMidi(event.clientX, rect),
+      holdTimeoutId: 0,
+      auditioning: false,
+      moved: false,
     };
+    state.holdTimeoutId = window.setTimeout(() => {
+      if (this.pointers.size !== 1 || state.moved) {
+        return;
+      }
+      state.auditioning = true;
+      this.onPianoKeyStart?.(state.midi);
+    }, HOLD_DELAY_MS);
+    this.pointers.set(event.pointerId, state);
+    if (this.pointers.size === 2) {
+      this.startPinch();
+    }
   };
 
   private readonly handlePointerMove = (event: PointerEvent): void => {
-    const gesture = this.pianoPointerGesture;
-    if (gesture === null || gesture.pointerId !== event.pointerId) {
+    const state = this.pointers.get(event.pointerId);
+    if (state === undefined) {
       return;
     }
-    const rect = this.canvas.getBoundingClientRect();
+    event.preventDefault();
+    const previousX = state.x;
+    const previousY = state.y;
+    state.x = event.clientX;
+    state.y = event.clientY;
     if (
-      event.clientX < rect.left ||
-      event.clientX > rect.right ||
-      event.clientY < rect.top ||
-      event.clientY > rect.bottom
+      Math.hypot(state.x - state.startX, state.y - state.startY) >=
+      DRAG_THRESHOLD_PX
     ) {
-      this.endPianoPointerGesture();
-      return;
-    }
-    if (
-      Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) >=
-      POINTER_MOVE_CANCEL_DISTANCE
-    ) {
-      window.clearTimeout(gesture.holdTimeoutId);
-      if (gesture.region === CanvasPointerRegion.Grid) {
-        gesture.shouldSuppressCanvasClick = true;
-      }
-      if (gesture.isAuditioning) {
-        gesture.isAuditioning = false;
+      state.moved = true;
+      window.clearTimeout(state.holdTimeoutId);
+      if (state.auditioning) {
+        state.auditioning = false;
         this.onPianoKeyStop?.();
       }
     }
+    if (this.pointers.size >= 2) {
+      this.updatePinch();
+      return;
+    }
+    if (!state.moved) {
+      return;
+    }
+    const rect = this.canvas.getBoundingClientRect();
+    const rollHeight = Math.max(1, rect.height - this.getKeyboardHeight());
+    this.panPitch(
+      -((state.x - previousX) / Math.max(1, rect.width)) *
+        this.visiblePitchCount,
+    );
+    this.panTime(
+      ((state.y - previousY) / rollHeight) * this.visibleSeconds,
+    );
+    this.render(this.currentTimeSeconds);
   };
 
   private readonly handlePointerEnd = (event: PointerEvent): void => {
-    const gesture = this.pianoPointerGesture;
-    if (gesture !== null && gesture.pointerId === event.pointerId) {
-      this.endPianoPointerGesture(event.type !== 'pointerup');
+    const state = this.pointers.get(event.pointerId);
+    if (state === undefined) {
+      return;
     }
-  };
-
-  private readonly handlePointerLeave = (event: PointerEvent): void => {
-    const gesture = this.pianoPointerGesture;
-    if (gesture !== null && gesture.pointerId === event.pointerId) {
-      this.endPianoPointerGesture(true);
+    window.clearTimeout(state.holdTimeoutId);
+    if (state.auditioning) {
+      this.onPianoKeyStop?.();
+    }
+    const wasPinching = this.pinchState !== null;
+    this.pointers.delete(event.pointerId);
+    if (this.canvas.hasPointerCapture(event.pointerId)) {
+      this.canvas.releasePointerCapture(event.pointerId);
+    }
+    if (
+      event.type === 'pointerup' &&
+      !state.moved &&
+      !state.auditioning &&
+      !wasPinching
+    ) {
+      this.seekAt(event.clientY);
+    }
+    this.pinchState = null;
+    if (this.pointers.size === 1) {
+      const remaining = [...this.pointers.values()][0];
+      remaining.startX = remaining.x;
+      remaining.startY = remaining.y;
+      remaining.moved = true;
     }
   };
 
   private readonly handleWindowBlur = (): void => {
-    this.endPianoPointerGesture(true);
+    this.cancelPointers();
   };
 
   private readonly handleVisibilityChange = (): void => {
     if (document.visibilityState === 'hidden') {
-      this.endPianoPointerGesture(true);
+      this.cancelPointers();
     }
   };
 
-  private endPianoPointerGesture(forceSuppressCanvasClick = false): void {
-    const gesture = this.pianoPointerGesture;
-    if (gesture === null) {
-      return;
-    }
-    this.pianoPointerGesture = null;
-    window.clearTimeout(gesture.holdTimeoutId);
-    const shouldSuppressCanvasClick =
-      forceSuppressCanvasClick ||
-      gesture.region === CanvasPointerRegion.Keyboard ||
-      gesture.shouldSuppressCanvasClick;
-    if (gesture.isAuditioning) {
+  private startPinch(): void {
+    const [first, second] = [...this.pointers.values()];
+    window.clearTimeout(first.holdTimeoutId);
+    window.clearTimeout(second.holdTimeoutId);
+    first.moved = true;
+    second.moved = true;
+    if (first.auditioning || second.auditioning) {
+      first.auditioning = false;
+      second.auditioning = false;
       this.onPianoKeyStop?.();
     }
-    if (this.canvas.hasPointerCapture(gesture.pointerId)) {
-      this.canvas.releasePointerCapture(gesture.pointerId);
+    this.pinchState = {
+      distanceX: Math.max(20, Math.abs(second.x - first.x)),
+      distanceY: Math.max(20, Math.abs(second.y - first.y)),
+      visibleSeconds: this.visibleSeconds,
+      visiblePitchCount: this.visiblePitchCount,
+      lowMidi: this.lowMidi,
+      timeOffsetSeconds: this.timeOffsetSeconds,
+      centerX: (first.x + second.x) / 2,
+      centerY: (first.y + second.y) / 2,
+    };
+  }
+
+  private updatePinch(): void {
+    const pinch = this.pinchState;
+    if (pinch === null || this.pointers.size < 2) {
+      return;
     }
-    if (shouldSuppressCanvasClick) {
-      this.suppressNextCanvasClick = true;
-      if (this.suppressClickTimeoutId !== null) {
-        window.clearTimeout(this.suppressClickTimeoutId);
+    const [first, second] = [...this.pointers.values()];
+    const rect = this.canvas.getBoundingClientRect();
+    const rollHeight = Math.max(1, rect.height - this.getKeyboardHeight());
+    const distanceX = Math.max(20, Math.abs(second.x - first.x));
+    const distanceY = Math.max(20, Math.abs(second.y - first.y));
+    const centerX = (first.x + second.x) / 2;
+    const centerY = (first.y + second.y) / 2;
+    const nextSeconds = clamp(
+      pinch.visibleSeconds * (pinch.distanceY / distanceY),
+      MIN_VISIBLE_SECONDS,
+      MAX_VISIBLE_SECONDS,
+    );
+    const desiredPitchCount = clamp(
+      pinch.visiblePitchCount * (pinch.distanceX / distanceX),
+      PITCH_RANGES[0],
+      PITCH_RANGES[PITCH_RANGES.length - 1],
+    );
+    this.pitchRangeIndex = nearestPitchRangeIndex(desiredPitchCount);
+    const pitchAnchor =
+      pinch.lowMidi +
+      ((pinch.centerX - rect.left) / Math.max(1, rect.width)) *
+        pinch.visiblePitchCount;
+    this.lowMidi = clampLowMidi(
+      Math.round(
+        pitchAnchor -
+          ((centerX - rect.left) / Math.max(1, rect.width)) *
+            this.visiblePitchCount,
+      ),
+      this.visiblePitchCount,
+    );
+    this.pitchPanRemainder = 0;
+    const timeAnchor =
+      this.currentTimeSeconds +
+      pinch.timeOffsetSeconds +
+      (1 - clamp((pinch.centerY - rect.top) / rollHeight, 0, 1)) *
+        pinch.visibleSeconds;
+    this.visibleSeconds = nextSeconds;
+    this.timeOffsetSeconds =
+      timeAnchor -
+      this.currentTimeSeconds -
+      (1 - clamp((centerY - rect.top) / rollHeight, 0, 1)) *
+        this.visibleSeconds;
+    this.follow = false;
+    this.clampTimeOffset();
+    this.render(this.currentTimeSeconds);
+  }
+
+  private zoomTimeAt(delta: number, yRatio: number): void {
+    const anchor =
+      this.anchorTimeSeconds + (1 - yRatio) * this.visibleSeconds;
+    this.visibleSeconds = clamp(
+      this.visibleSeconds * (delta > 0 ? 1.12 : 0.89),
+      MIN_VISIBLE_SECONDS,
+      MAX_VISIBLE_SECONDS,
+    );
+    this.timeOffsetSeconds =
+      anchor - this.currentTimeSeconds - (1 - yRatio) * this.visibleSeconds;
+    this.follow = false;
+    this.clampTimeOffset();
+  }
+
+  private zoomPitchAt(delta: number, xRatio: number): void {
+    const anchor = this.lowMidi + xRatio * this.visiblePitchCount;
+    const nextIndex = clamp(
+      this.pitchRangeIndex + (delta > 0 ? 1 : -1),
+      0,
+      PITCH_RANGES.length - 1,
+    );
+    this.pitchRangeIndex = nextIndex;
+    this.lowMidi = clampLowMidi(
+      Math.round(anchor - xRatio * this.visiblePitchCount),
+      this.visiblePitchCount,
+    );
+    this.pitchPanRemainder = 0;
+  }
+
+  private panTime(deltaSeconds: number): void {
+    if (Math.abs(deltaSeconds) < 0.0001) {
+      return;
+    }
+    this.timeOffsetSeconds += deltaSeconds;
+    this.follow = false;
+    this.clampTimeOffset();
+  }
+
+  private panPitch(deltaPitches: number): void {
+    if (!Number.isFinite(deltaPitches) || deltaPitches === 0) {
+      return;
+    }
+    const nextLowMidi = clampLowMidi(
+      this.lowMidi + this.pitchPanRemainder + deltaPitches,
+      this.visiblePitchCount,
+    );
+    this.lowMidi = Math.round(nextLowMidi);
+    this.pitchPanRemainder = nextLowMidi - this.lowMidi;
+  }
+
+  private seekAt(clientY: number): void {
+    const rect = this.canvas.getBoundingClientRect();
+    const rollHeight = Math.max(1, rect.height - this.getKeyboardHeight());
+    const y = clientY - rect.top;
+    if (y < 0 || y > rollHeight) {
+      return;
+    }
+    const time =
+      this.anchorTimeSeconds + (1 - y / rollHeight) * this.visibleSeconds;
+    this.onSeek?.(clamp(time, 0, this.durationSeconds));
+  }
+
+  private cancelPointers(): void {
+    let shouldStop = false;
+    for (const state of this.pointers.values()) {
+      window.clearTimeout(state.holdTimeoutId);
+      shouldStop ||= state.auditioning;
+      if (this.canvas.hasPointerCapture(state.id)) {
+        this.canvas.releasePointerCapture(state.id);
       }
-      this.suppressClickTimeoutId = window.setTimeout(() => {
-        this.suppressNextCanvasClick = false;
-        this.suppressClickTimeoutId = null;
-      }, 0);
+    }
+    this.pointers.clear();
+    this.pinchState = null;
+    if (shouldStop) {
+      this.onPianoKeyStop?.();
     }
   }
 
-  private getKeyboardWidth(): number {
+  private centerPitchRange(notes: AnalyzedNote[]): void {
+    const pitches = notes
+      .map(note => note.pitchMidi)
+      .filter(pitch => pitch >= FIRST_MIDI_NOTE && pitch <= LAST_MIDI_NOTE)
+      .sort((left, right) => left - right);
+    if (pitches.length === 0) {
+      this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
+      this.lowMidi = DEFAULT_LOW_MIDI;
+      this.pitchPanRemainder = 0;
+      return;
+    }
+    const usefulPitchCount = pitches[pitches.length - 1] - pitches[0] + 1;
+    if (usefulPitchCount > this.visiblePitchCount) {
+      this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
+      this.lowMidi = DEFAULT_LOW_MIDI;
+      this.pitchPanRemainder = 0;
+      return;
+    }
+    const median = pitches[Math.floor(pitches.length / 2)];
+    this.lowMidi = clampLowMidi(
+      Math.round(median - this.visiblePitchCount / 2),
+      this.visiblePitchCount,
+    );
+    this.pitchPanRemainder = 0;
+  }
+
+  private clampTimeOffset(): void {
+    this.timeOffsetSeconds =
+      clamp(
+        this.currentTimeSeconds + this.timeOffsetSeconds,
+        0,
+        this.durationSeconds,
+      ) - this.currentTimeSeconds;
+  }
+
+  private timeToY(timeSeconds: number, rollHeight: number): number {
+    return (
+      rollHeight -
+      ((timeSeconds - this.anchorTimeSeconds) / this.visibleSeconds) *
+        rollHeight
+    );
+  }
+
+  private pitchToX(midi: number, width: number): number {
+    return ((midi - this.lowMidi) / this.visiblePitchCount) * width;
+  }
+
+  private isPitchVisible(midi: number): boolean {
+    return midi >= this.lowMidi && midi < this.lowMidi + this.visiblePitchCount;
+  }
+
+  private clientXToMidi(clientX: number, rect: DOMRect): number {
+    const ratio = clamp(
+      (clientX - rect.left) / Math.max(1, rect.width),
+      0,
+      0.999999,
+    );
+    return clamp(
+      this.lowMidi + Math.floor(ratio * this.visiblePitchCount),
+      FIRST_MIDI_NOTE,
+      LAST_MIDI_NOTE,
+    );
+  }
+
+  private getKeyboardHeight(): number {
     return window.innerWidth <= MOBILE_BREAKPOINT_PX
-      ? MOBILE_PIANO_KEYBOARD_WIDTH
-      : DESKTOP_PIANO_KEYBOARD_WIDTH;
+      ? MOBILE_KEYBOARD_HEIGHT
+      : DESKTOP_KEYBOARD_HEIGHT;
   }
 }
 
 function activationToAlpha(activation: number, contrast: number): number {
-  const normalized = Math.min(1, Math.max(0, activation / 255));
+  const normalized = clamp(activation / 255, 0, 1);
   const floor = 0.05 + (contrast - MIN_CONTRAST) * 0.05;
   const adjusted = Math.max(0, (normalized - floor) / (1 - floor));
   return adjusted ** (1 + contrast * 0.42);
-}
-
-function createTileCanvas(width: number, height: number): TileCanvas {
-  if (typeof OffscreenCanvas !== 'undefined') {
-    return new OffscreenCanvas(width, height);
-  }
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  return canvas;
-}
-
-function getTileContext(canvas: TileCanvas): TileContext {
-  const context = canvas.getContext('2d') as TileContext | null;
-  if (context === null) {
-    throw new Error('Tile Canvas 2D is not available');
-  }
-  return context;
 }
 
 function isBlackKey(midi: number): boolean {
@@ -713,6 +832,31 @@ function isBlackKey(midi: number): boolean {
     pitchClass === 8 ||
     pitchClass === 10
   );
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function clampLowMidi(lowMidi: number, pitchCount: number): number {
+  return clamp(
+    lowMidi,
+    FIRST_MIDI_NOTE,
+    LAST_MIDI_NOTE - pitchCount + 1,
+  );
+}
+
+function nearestPitchRangeIndex(value: number): number {
+  let closestIndex = 0;
+  let closestDistance = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < PITCH_RANGES.length; index += 1) {
+    const distance = Math.abs(PITCH_RANGES[index] - value);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestIndex = index;
+    }
+  }
+  return closestIndex;
 }
 
 function lowerBound(values: Float32Array, target: number): number {
@@ -733,7 +877,7 @@ function frameDuration(result: AnalysisResult, frame: number): number {
   if (frame + 1 < result.frameTimestamps.length) {
     return result.frameTimestamps[frame + 1] - result.frameTimestamps[frame];
   }
-  return 1 / ANNOTATIONS_PER_SECOND;
+  return 1 / 86;
 }
 
 function createNoteIndex(notes: AnalyzedNote[]): NoteIndexBlock[] {
@@ -741,16 +885,12 @@ function createNoteIndex(notes: AnalyzedNote[]): NoteIndexBlock[] {
     (left, right) => left.startTimeSeconds - right.startTimeSeconds,
   );
   const index: NoteIndexBlock[] = [];
-
   for (
     let start = 0;
     start < sortedNotes.length;
     start += NOTES_PER_INDEX_BLOCK
   ) {
-    const blockNotes = sortedNotes.slice(
-      start,
-      start + NOTES_PER_INDEX_BLOCK,
-    );
+    const blockNotes = sortedNotes.slice(start, start + NOTES_PER_INDEX_BLOCK);
     let maximumEndTimeSeconds = 0;
     for (const note of blockNotes) {
       maximumEndTimeSeconds = Math.max(
@@ -760,8 +900,5 @@ function createNoteIndex(notes: AnalyzedNote[]): NoteIndexBlock[] {
     }
     index.push({ notes: blockNotes, maximumEndTimeSeconds });
   }
-
   return index;
 }
-
-const ANNOTATIONS_PER_SECOND = 86;
