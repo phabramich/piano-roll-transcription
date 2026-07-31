@@ -56,7 +56,7 @@ app.innerHTML = `
               <div class="recognition-mode" id="recognition-mode" role="radiogroup" aria-label="Режим распознавания" hidden>
                 <button class="button recognition-mode__option recognition-mode__option--selected" id="instant-mode-button" type="button" role="radio" aria-checked="true">Быстро</button>
                 <button class="button recognition-mode__option" id="precise-mode-button" type="button" role="radio" aria-checked="false">Точнее</button>
-                <p id="recognition-mode-hint"></p>
+                <p class="recognition-help" id="recognition-mode-hint"></p>
               </div>
               <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить аудиофайл" title="Заменить аудиофайл"><span aria-hidden="true">↗</span><span class="button__label">Заменить</span></button>
             </div>
@@ -80,7 +80,7 @@ app.innerHTML = `
           </div>
           <canvas id="piano-roll" tabindex="0" aria-label="Падающая партитура. Перетаскивайте для обзора, нажимайте для перехода к позиции и удерживайте, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
         </section>
-        <div class="player__rail"><span>Drag — обзор · Tap — позиция · Hold — нота</span><span class="player__rail-duration" id="rail-duration">0:00</span></div>
+        <div class="player__rail"><span>Перетащить — обзор · Нажать — позиция · Удерживать — нота</span><span class="player__rail-duration" id="rail-duration">0:00</span></div>
       </section>
     </section>
   </main>
