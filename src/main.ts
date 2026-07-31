@@ -53,8 +53,8 @@ app.innerHTML = `
                 <output class="contrast-control__value" id="contrast-value" for="contrast">1,4×</output>
               </label>
               <div class="recognition-mode" id="recognition-mode" role="radiogroup" aria-label="Режим распознавания" hidden>
-                <button class="button button--accent" id="instant-mode-button" type="button" role="radio" aria-checked="true">Быстро</button>
-                <button class="button button--secondary" id="precise-mode-button" type="button" role="radio" aria-checked="false">Точнее</button>
+                <button class="button recognition-mode__option recognition-mode__option--selected" id="instant-mode-button" type="button" role="radio" aria-checked="true">Быстро</button>
+                <button class="button recognition-mode__option" id="precise-mode-button" type="button" role="radio" aria-checked="false">Точнее</button>
                 <p id="recognition-mode-hint"></p>
               </div>
               <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить аудиофайл" title="Заменить аудиофайл"><span aria-hidden="true">↗</span><span class="button__label">Заменить</span></button>
@@ -287,6 +287,25 @@ elements.instantModeButton.addEventListener('click', () => {
 
 elements.preciseModeButton.addEventListener('click', () => {
   selectRecognitionMode(RecognitionMode.Precise);
+});
+
+elements.recognitionMode.addEventListener('keydown', event => {
+  let nextMode: RecognitionMode | null = null;
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    nextMode = RecognitionMode.Instant;
+  } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    nextMode = RecognitionMode.Precise;
+  }
+  if (nextMode === null) {
+    return;
+  }
+  event.preventDefault();
+  selectRecognitionMode(nextMode);
+  if (nextMode === RecognitionMode.Instant) {
+    elements.instantModeButton.focus();
+  } else {
+    elements.preciseModeButton.focus();
+  }
 });
 
 elements.contrast.addEventListener('input', () => {
@@ -700,6 +719,8 @@ function updateRecognitionModeUi(): void {
   const canUseModes = fullFastSpectrumReady && fastAnalysisResult !== null;
   elements.instantModeButton.setAttribute('aria-checked', String(isInstant));
   elements.preciseModeButton.setAttribute('aria-checked', String(!isInstant));
+  elements.instantModeButton.classList.toggle('recognition-mode__option--selected', isInstant);
+  elements.preciseModeButton.classList.toggle('recognition-mode__option--selected', !isInstant);
   elements.instantModeButton.disabled = !canUseModes;
   elements.preciseModeButton.disabled = !canUseModes;
   elements.recognitionModeHint.textContent = preciseModelReadyOnDevice
