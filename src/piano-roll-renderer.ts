@@ -311,6 +311,16 @@ export class PianoRollRenderer {
     context.fillStyle = DESIGN_COLORS.surface;
     context.fillRect(0, 0, width, rollHeight);
     const columnWidth = width / this.visiblePitchCount;
+    context.fillStyle = DESIGN_COLORS.grid;
+    context.globalAlpha = 0.55;
+    for (let index = 0; index < this.visiblePitchCount; index += 1) {
+      const midi = this.lowMidi + index;
+      if (!isBlackKey(midi)) {
+        continue;
+      }
+      context.fillRect(index * columnWidth, 0, columnWidth, rollHeight);
+    }
+    context.globalAlpha = 1;
     context.strokeStyle = DESIGN_COLORS.grid;
     context.lineWidth = 1;
     for (let pitch = 0; pitch <= this.visiblePitchCount; pitch += 1) {
@@ -432,26 +442,23 @@ export class PianoRollRenderer {
   ): void {
     const context = this.context;
     const columnWidth = width / this.visiblePitchCount;
+    const highMidi = this.lowMidi + this.visiblePitchCount;
     context.fillStyle = DESIGN_COLORS.surface;
     context.fillRect(0, top, width, keyboardHeight);
-    for (let index = 0; index < this.visiblePitchCount; index += 1) {
-      const midi = this.lowMidi + index;
-      if (isBlackKey(midi)) {
-        continue;
-      }
-      const x = index * columnWidth;
+    this.forEachVisibleWhiteKey((leftMidi, rightMidi) => {
+      const x = this.pitchToX(leftMidi, width);
+      const keyWidth = this.pitchToX(rightMidi, width) - x;
       context.fillStyle = DESIGN_COLORS.surface;
-      context.fillRect(x, top, columnWidth + 0.5, keyboardHeight);
+      context.fillRect(x, top, keyWidth + 0.5, keyboardHeight);
       context.strokeStyle = DESIGN_COLORS.grid;
-      context.strokeRect(x, top, columnWidth, keyboardHeight);
-    }
+      context.strokeRect(x, top, keyWidth, keyboardHeight);
+    });
     this.drawActiveKeys(width, top, keyboardHeight, false);
-    for (let index = 0; index < this.visiblePitchCount; index += 1) {
-      const midi = this.lowMidi + index;
+    for (let midi = this.lowMidi; midi < highMidi; midi += 1) {
       if (!isBlackKey(midi)) {
         continue;
       }
-      const x = index * columnWidth + columnWidth * 0.12;
+      const x = this.pitchToX(midi, width) + columnWidth * 0.12;
       context.fillStyle = DESIGN_COLORS.text;
       context.fillRect(x, top, columnWidth * 0.76, keyboardHeight * 0.62);
     }
@@ -476,6 +483,7 @@ export class PianoRollRenderer {
       result.frameCount - 1,
     );
     const columnWidth = width / this.visiblePitchCount;
+    const highMidi = this.lowMidi + this.visiblePitchCount;
     this.context.fillStyle = DESIGN_COLORS.keyActive;
     for (let pitch = 0; pitch < result.pitchCount; pitch += 1) {
       const midi = FIRST_MIDI_NOTE + pitch;
@@ -492,16 +500,48 @@ export class PianoRollRenderer {
         this.keyActivationThreshold,
         this.maxActiveKeyAlpha,
       );
-      const x = this.pitchToX(midi, width);
       this.context.globalAlpha = alpha;
-      this.context.fillRect(
-        x + (black ? columnWidth * 0.12 : 1),
-        top + 1,
-        black ? columnWidth * 0.76 : Math.max(1, columnWidth - 2),
-        (black ? keyboardHeight * 0.62 : keyboardHeight) - 2,
-      );
+      if (black) {
+        const x = this.pitchToX(midi, width);
+        this.context.fillRect(
+          x + columnWidth * 0.12,
+          top + 1,
+          columnWidth * 0.76,
+          keyboardHeight * 0.62 - 2,
+        );
+      } else {
+        const leftMidi = Math.max(midi, this.lowMidi);
+        const rightMidi = Math.min(nextWhiteMidi(midi), highMidi);
+        const x = this.pitchToX(leftMidi, width);
+        const keyWidth = this.pitchToX(rightMidi, width) - x;
+        this.context.fillRect(
+          x + 1,
+          top + 1,
+          Math.max(1, keyWidth - 2),
+          keyboardHeight - 2,
+        );
+      }
     }
     this.context.globalAlpha = 1;
+  }
+
+  private forEachVisibleWhiteKey(
+    callback: (leftMidi: number, rightMidi: number) => void,
+  ): void {
+    const highMidi = this.lowMidi + this.visiblePitchCount;
+    const seen = new Set<number>();
+    for (let midi = this.lowMidi; midi < highMidi; midi += 1) {
+      const startMidi = isBlackKey(midi) ? midi - 1 : midi;
+      if (seen.has(startMidi)) {
+        continue;
+      }
+      seen.add(startMidi);
+      const leftMidi = Math.max(startMidi, this.lowMidi);
+      const rightMidi = Math.min(nextWhiteMidi(startMidi), highMidi);
+      if (leftMidi < rightMidi) {
+        callback(leftMidi, rightMidi);
+      }
+    }
   }
 
   private drawPlaybackPosition(width: number, rollHeight: number): void {
@@ -836,29 +876,66 @@ export class PianoRollRenderer {
   }
 
   private centerPitchRange(notes: AnalyzedNote[]): void {
+    const span = this.resolveUsefulPitchSpan(notes);
+    if (span === null) {
+      this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
+      this.lowMidi = DEFAULT_LOW_MIDI;
+      this.pitchPanRemainder = 0;
+      return;
+    }
+    const usefulPitchCount = span.high - span.low + 1;
+    this.pitchRangeIndex = smallestFittingPitchRangeIndex(usefulPitchCount);
+    const midpoint = (span.low + span.high) / 2;
+    this.lowMidi = clampLowMidi(
+      Math.round(midpoint - this.visiblePitchCount / 2),
+      this.visiblePitchCount,
+    );
+    this.pitchPanRemainder = 0;
+  }
+
+  private resolveUsefulPitchSpan(
+    notes: AnalyzedNote[],
+  ): { low: number; high: number } | null {
     const pitches = notes
       .map(note => note.pitchMidi)
       .filter(pitch => pitch >= FIRST_MIDI_NOTE && pitch <= LAST_MIDI_NOTE)
       .sort((left, right) => left - right);
-    if (pitches.length === 0) {
-      this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
-      this.lowMidi = DEFAULT_LOW_MIDI;
-      this.pitchPanRemainder = 0;
-      return;
+    if (pitches.length > 0) {
+      return {
+        low: Math.max(FIRST_MIDI_NOTE, pitches[0] - 2),
+        high: Math.min(LAST_MIDI_NOTE, pitches[pitches.length - 1] + 2),
+      };
     }
-    const usefulPitchCount = pitches[pitches.length - 1] - pitches[0] + 1;
-    if (usefulPitchCount > this.visiblePitchCount) {
-      this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
-      this.lowMidi = DEFAULT_LOW_MIDI;
-      this.pitchPanRemainder = 0;
-      return;
+    return this.spanFromFrameProbabilities();
+  }
+
+  private spanFromFrameProbabilities(): { low: number; high: number } | null {
+    const result = this.result;
+    if (result === null || result.frameCount === 0) {
+      return null;
     }
-    const median = pitches[Math.floor(pitches.length / 2)];
-    this.lowMidi = clampLowMidi(
-      Math.round(median - this.visiblePitchCount / 2),
-      this.visiblePitchCount,
-    );
-    this.pitchPanRemainder = 0;
+    const threshold = 48;
+    let low = LAST_MIDI_NOTE + 1;
+    let high = FIRST_MIDI_NOTE - 1;
+    const frameStep = Math.max(1, Math.floor(result.frameCount / 240));
+    for (let frame = 0; frame < result.frameCount; frame += frameStep) {
+      const offset = frame * result.pitchCount;
+      for (let pitch = 0; pitch < result.pitchCount; pitch += 1) {
+        if (result.frameProbabilities[offset + pitch] < threshold) {
+          continue;
+        }
+        const midi = FIRST_MIDI_NOTE + pitch;
+        low = Math.min(low, midi);
+        high = Math.max(high, midi);
+      }
+    }
+    if (high < low) {
+      return null;
+    }
+    return {
+      low: Math.max(FIRST_MIDI_NOTE, low - 2),
+      high: Math.min(LAST_MIDI_NOTE, high + 2),
+    };
   }
 
   private clampTimeOffset(): void {
@@ -969,6 +1046,23 @@ function isBlackKey(midi: number): boolean {
     pitchClass === 8 ||
     pitchClass === 10
   );
+}
+
+function nextWhiteMidi(midi: number): number {
+  let next = midi + 1;
+  while (isBlackKey(next)) {
+    next += 1;
+  }
+  return next;
+}
+
+function smallestFittingPitchRangeIndex(usefulPitchCount: number): number {
+  for (let index = 0; index < PITCH_RANGES.length; index += 1) {
+    if (PITCH_RANGES[index] >= usefulPitchCount) {
+      return index;
+    }
+  }
+  return PITCH_RANGES.length - 1;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
