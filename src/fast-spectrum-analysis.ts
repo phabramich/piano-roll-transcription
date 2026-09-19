@@ -53,12 +53,22 @@ const STOP_ABSOLUTE = 1.0;
 const SHORTLIST_COUNT = 16;
 const SHORTLIST_RATIO = 0.2;
 
+// Post-pick fundamental refinement: measured snapped partials are refit to the
+// inharmonic model and the winner is clamped inside ±75 cents of the grid f0.
+const REFINEMENT_MIN_PARTIALS = 3;
+const REFINEMENT_MIN_PARTIALS_FOR_B = 5;
+const REFINEMENT_MAX_DETUNE = 2 ** (75 / 1200);
+const REFINEMENT_B_CANDIDATES = [0.25, 1, 4];
+
 interface PartialLayout {
   // For every pitch and detune step: bin positions of the stretched partials.
   positions: Float32Array;
   // Per pitch: how many partials fit below MAX_PARTIAL_FREQUENCY.
   counts: Uint8Array;
   weights: Float32Array;
+  // Equal-tempered fundamentals (Hz) and the Fletcher B prior per pitch.
+  fundamentals: Float32Array;
+  inharmonicity: Float32Array;
 }
 
 const PARTIAL_LAYOUT = createPartialLayout();
@@ -82,6 +92,10 @@ export class FastSpectrumAnalyzer {
   private readonly candidateSteps = new Int8Array(PITCH_COUNT);
   private readonly shortlist = new Int32Array(PITCH_COUNT);
   private readonly used = new Uint8Array(PITCH_COUNT);
+  private readonly refinedPositions = new Float32Array(MAX_PARTIALS);
+  private readonly partialWeights = new Float32Array(MAX_PARTIALS);
+  private readonly partialBins = new Float32Array(MAX_PARTIALS);
+  private readonly partialHarmonics = new Uint8Array(MAX_PARTIALS);
   private hasPreviousPhase = false;
 
   public constructor(private readonly samples: Float32Array) {
@@ -162,8 +176,68 @@ export class FastSpectrumAnalyzer {
         this.energies[frameOffset + best.pitch],
         Math.log1p(best.score * 4),
       );
-      this.cancelNote(best.pitch, best.step);
+      this.cancelNote(best.pitch, best.step, this.refinePositions(best.pitch, best.step));
     }
+  }
+
+  /**
+   * Fit the winner's true fundamental (and inharmonicity, when enough partials
+   * were measured) from the snapped peak positions. The ±50¢ grid gets within
+   * a quarter-tone; the LSQ fit gets within a few cents — the cancellation
+   * footprint then lands on the note's actual energy instead of its neighbors'.
+   */
+  private refinePositions(pitch: number, step: number): Float32Array {
+    const layout = PARTIAL_LAYOUT;
+    const count = layout.counts[pitch];
+    const base = (pitch * DETUNE_STEP_COUNT + step) * MAX_PARTIALS;
+    const { residual, snapPosition, refinedPositions, partialWeights, partialBins, partialHarmonics } = this;
+    const modelB = layout.inharmonicity[pitch];
+
+    let measured = 0;
+    for (let n = 0; n < count; n += 1) {
+      const position = layout.positions[base + n];
+      const bin = Math.min(BIN_COUNT - 1, Math.max(0, Math.round(position)));
+      const snap = snapPosition[bin];
+      if (snap < 0 || Math.abs(snap - position) > PARTIAL_SNAP_RADIUS_BINS) {
+        continue;
+      }
+      partialWeights[measured] = Math.min(
+        interpolate(residual, snap),
+        PARTIAL_SATURATION + 1,
+      );
+      partialBins[measured] = snap;
+      partialHarmonics[measured] = n + 1;
+      measured += 1;
+    }
+
+    const centerFrequency = layout.fundamentals[pitch] * 2 ** (DETUNE_STEPS_CENTS[step] / 1200);
+    let fundamental = centerFrequency;
+    let inharmonicity = modelB;
+    if (measured >= REFINEMENT_MIN_PARTIALS) {
+      const fit = fitInharmonicModel(
+        partialBins,
+        partialHarmonics,
+        partialWeights,
+        measured,
+        modelB,
+      );
+      if (fit.fundamental > 0) {
+        fundamental = clamp(
+          fit.fundamental,
+          centerFrequency * REFINEMENT_MAX_DETUNE,
+          centerFrequency / REFINEMENT_MAX_DETUNE,
+        );
+        inharmonicity = fit.inharmonicity;
+      }
+    }
+
+    for (let n = 0; n < count; n += 1) {
+      const harmonic = n + 1;
+      const frequency =
+        fundamental * harmonic * Math.sqrt(1 + inharmonicity * harmonic * harmonic);
+      refinedPositions[n] = (frequency * FFT_SIZE) / SAMPLE_RATE;
+    }
+    return refinedPositions;
   }
 
   private scoreCandidates(used: Uint8Array): {
@@ -249,14 +323,12 @@ export class FastSpectrumAnalyzer {
     return sum;
   }
 
-  private cancelNote(pitch: number, step: number): void {
-    const layout = PARTIAL_LAYOUT;
-    const count = layout.counts[pitch];
-    const base = (pitch * DETUNE_STEP_COUNT + step) * MAX_PARTIALS;
+  private cancelNote(pitch: number, step: number, positions: Float32Array): void {
+    const count = PARTIAL_LAYOUT.counts[pitch];
     const { residual, snapPosition } = this;
 
     for (let n = 0; n < count; n += 1) {
-      const position = layout.positions[base + n];
+      const position = positions[n];
       const bin = Math.min(BIN_COUNT - 1, Math.max(0, Math.round(position)));
       const center = snapPosition[bin] >= 0 ? snapPosition[bin] : position;
       const amplitude = interpolate(residual, center);
@@ -291,6 +363,8 @@ function createPartialLayout(): PartialLayout {
   );
   const counts = new Uint8Array(PITCH_COUNT);
   const weights = new Float32Array(MAX_PARTIALS);
+  const fundamentals = new Float32Array(PITCH_COUNT);
+  const inharmonicityProfile = new Float32Array(PITCH_COUNT);
   for (let n = 0; n < MAX_PARTIALS; n += 1) {
     weights[n] = (n + 1) ** -PARTIAL_WEIGHT_EXPONENT;
   }
@@ -303,6 +377,8 @@ function createPartialLayout(): PartialLayout {
         2 ** ((midi - INHARMONICITY_REF_MIDI) / INHARMONICITY_OCTAVE_RATE),
       INHARMONICITY_FLOOR,
     );
+    fundamentals[pitch] = fundamental;
+    inharmonicityProfile[pitch] = inharmonicity;
 
     let count = 0;
     for (let step = 0; step < DETUNE_STEP_COUNT; step += 1) {
@@ -320,7 +396,71 @@ function createPartialLayout(): PartialLayout {
     }
     counts[pitch] = count >= MIN_PARTIAL_COUNT ? count : 0;
   }
-  return { positions, counts, weights };
+  return {
+    positions,
+    counts,
+    weights,
+    fundamentals,
+    inharmonicity: inharmonicityProfile,
+  };
+}
+
+/**
+ * Weighted least-squares fit of the inharmonic model f_n = n·f1·√(1+B·n²) to
+ * measured partial positions. f1 falls out as a weighted mean of per-partial
+ * estimates; B is picked from a small multiplicative grid around the Fletcher
+ * prior (only with enough partials to constrain it — otherwise the prior wins).
+ */
+function fitInharmonicModel(
+  bins: Float32Array,
+  harmonics: Uint8Array,
+  weights: Float32Array,
+  measured: number,
+  modelB: number,
+): { fundamental: number; inharmonicity: number } {
+  const candidates =
+    measured >= REFINEMENT_MIN_PARTIALS_FOR_B
+      ? REFINEMENT_B_CANDIDATES
+      : [1];
+  const binToHz = SAMPLE_RATE / FFT_SIZE;
+  let bestError = Infinity;
+  let bestFundamental = 0;
+  let bestB = modelB;
+
+  for (const factor of candidates) {
+    const b = modelB * factor;
+    let weightSum = 0;
+    let estimateSum = 0;
+    for (let index = 0; index < measured; index += 1) {
+      const harmonic = harmonics[index];
+      const estimate =
+        (bins[index] * binToHz) /
+        (harmonic * Math.sqrt(1 + b * harmonic * harmonic));
+      const weight = weights[index];
+      estimateSum += weight * estimate;
+      weightSum += weight;
+    }
+    if (weightSum <= 0) {
+      continue;
+    }
+    const fundamental = estimateSum / weightSum;
+
+    let error = 0;
+    for (let index = 0; index < measured; index += 1) {
+      const harmonic = harmonics[index];
+      const predicted =
+        (fundamental * harmonic * Math.sqrt(1 + b * harmonic * harmonic)) / binToHz;
+      const deviation = predicted - bins[index];
+      error += weights[index] * deviation * deviation;
+    }
+    if (error < bestError) {
+      bestError = error;
+      bestFundamental = fundamental;
+      bestB = b;
+    }
+  }
+
+  return { fundamental: bestFundamental, inharmonicity: bestB };
 }
 
 /**
