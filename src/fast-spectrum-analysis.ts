@@ -60,6 +60,12 @@ const REFINEMENT_MIN_PARTIALS_FOR_B = 5;
 const REFINEMENT_MAX_DETUNE = 2 ** (75 / 1200);
 const REFINEMENT_B_CANDIDATES = [0.25, 1, 4];
 
+// First-order temporal prior (cheap HMM): a pitch detected recently gets a
+// score boost that decays over ~300 ms. Sustained/decaying notes stop
+// flickering at the threshold; a note absent for ~30 frames gets no help.
+const PERSISTENCE_GAIN = 0.6;
+const PERSISTENCE_DECAY = 0.96;
+
 interface PartialLayout {
   // For every pitch and detune step: bin positions of the stretched partials.
   positions: Float32Array;
@@ -99,9 +105,12 @@ export class FastSpectrumAnalyzer {
   private readonly verifyResidual = new Float32Array(BIN_COUNT);
   private readonly acceptedPitches = new Uint8Array(MAX_NOTES_PER_FRAME);
   private readonly acceptedSteps = new Int8Array(MAX_NOTES_PER_FRAME);
+  private readonly acceptedScores = new Float32Array(MAX_NOTES_PER_FRAME);
   private readonly acceptedPositions = new Float32Array(
     MAX_NOTES_PER_FRAME * MAX_PARTIALS,
   );
+  // Per-pitch continuity state: how recently/how strongly each note sounded.
+  private readonly persistence = new Float32Array(PITCH_COUNT);
   private hasPreviousPhase = false;
 
   public constructor(private readonly samples: Float32Array) {
@@ -164,7 +173,7 @@ export class FastSpectrumAnalyzer {
     const frameOffset = frame * PITCH_COUNT;
     this.energies.fill(0, frameOffset, frameOffset + PITCH_COUNT);
     const used = this.used.fill(0);
-    const { acceptedPitches, acceptedSteps, acceptedPositions } = this;
+    const { acceptedPitches, acceptedSteps, acceptedScores, acceptedPositions } = this;
     let firstScore = 0;
     let accepted = 0;
 
@@ -183,6 +192,7 @@ export class FastSpectrumAnalyzer {
       const positions = this.refinePositions(best.pitch, best.step);
       acceptedPitches[accepted] = best.pitch;
       acceptedSteps[accepted] = best.step;
+      acceptedScores[accepted] = best.score;
       acceptedPositions.set(positions.subarray(0, PARTIAL_LAYOUT.counts[best.pitch]), accepted * MAX_PARTIALS);
       this.energies[frameOffset + best.pitch] = Math.max(
         this.energies[frameOffset + best.pitch],
@@ -194,6 +204,19 @@ export class FastSpectrumAnalyzer {
 
     if (accepted > 1) {
       this.verifyAccepted(accepted, frameOffset);
+    }
+
+    // Temporal prior update: decay all pitches, then mark the ones that
+    // sounded this frame — proportional to their relative strength, so a
+    // marginal detection can't fully re-boost itself next frame.
+    const { persistence } = this;
+    for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
+      persistence[pitch] *= PERSISTENCE_DECAY;
+    }
+    for (let index = 0; index < accepted; index += 1) {
+      const strength = Math.min(1, acceptedScores[index] / firstScore);
+      const pitch = acceptedPitches[index];
+      persistence[pitch] = Math.max(persistence[pitch], strength);
     }
   }
 
@@ -300,7 +323,8 @@ export class FastSpectrumAnalyzer {
     for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
       const score = used[pitch] !== 0
         ? 0
-        : this.salience(pitch, 2, layout, this.residual);
+        : this.salience(pitch, 2, layout, this.residual) *
+          (1 + PERSISTENCE_GAIN * this.persistence[pitch]);
       candidateScores[pitch] = score;
       candidateSteps[pitch] = 2;
       if (score > bestCoarse) {
@@ -330,7 +354,9 @@ export class FastSpectrumAnalyzer {
         if (step === 2) {
           continue;
         }
-        const score = this.salience(pitch, step, layout, this.residual);
+        const score =
+          this.salience(pitch, step, layout, this.residual) *
+          (1 + PERSISTENCE_GAIN * this.persistence[pitch]);
         if (score > candidateScores[pitch]) {
           candidateScores[pitch] = score;
           candidateSteps[pitch] = step;
