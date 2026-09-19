@@ -1,16 +1,27 @@
 import { AnalysisClient, AnalysisClientError } from './analysis-client';
-import { AnalysisErrorCode, AnalysisPhase, type AnalysisResult, RecognitionMode } from './analysis-types';
+import { AnalysisErrorCode, AnalysisPhase, type AnalysisResult, type AnalyzedNote, RecognitionMode } from './analysis-types';
 import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-player';
 import { FastSpectrumClient, FastSpectrumClientError } from './fast-spectrum';
+import type { FastSpectrumOptions } from './fast-spectrum-analysis';
 import { PianoRollRenderer } from './piano-roll-renderer';
 import { PianoAudition } from './piano-audition';
 import { WaveformTimeline } from './waveform-timeline';
+import { ICONS } from './icons';
+import '@fontsource-variable/unbounded';
 import './style.css';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (app === null) {
   throw new Error('Application root is missing');
 }
+
+// Pointer clicks on buttons must not move focus — otherwise Space stops
+// toggling playback after any UI interaction. Keyboard focus is unaffected.
+app.addEventListener('mousedown', event => {
+  if (event.target instanceof Element && event.target.closest('button') !== null) {
+    event.preventDefault();
+  }
+});
 
 app.innerHTML = `
   <main class="application">
@@ -19,23 +30,43 @@ app.innerHTML = `
         <span class="application__mark" aria-hidden="true"><span class="application__mark-keys"><i></i><i></i><i></i><i></i></span><span class="application__mark-note"></span></span>
         <h1>pianorolltranscribe</h1>
       </div>
-      <p class="application__privacy"><span aria-hidden="true">●</span> Локальная обработка</p>
+      <p class="application__privacy" title="Аудио декодируется и анализируется в браузере — ничего не отправляется">${ICONS.shieldCheck}<span>Локальная обработка</span></p>
     </header>
     <section class="workspace" id="workspace" aria-busy="false">
       <p class="visually-hidden" id="status" role="status" aria-live="polite"></p>
-      <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-controls="file-input">
+      <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-controls="file-input" aria-describedby="drop-description">
         <input id="file-input" type="file" accept="audio/*" hidden>
         <span class="drop-zone__motif" aria-hidden="true">
-          <svg viewBox="0 0 500 112" fill="none" preserveAspectRatio="none"><path d="M0 57h500M0 33h500M0 81h500" stroke="currentColor" opacity=".12"/><path d="M0 74c14-2 19-37 33-37 14 0 20 62 35 62 16 0 21-74 36-74 13 0 18 50 31 50 14 0 19-22 33-22 15 0 19 34 33 34 14 0 20-67 35-67 14 0 19 43 33 43 14 0 20-29 35-29 13 0 19 54 32 54 15 0 20-44 35-44 15 0 20 28 35 28 14 0 20-20 35-20 15 0 19 42 34 42 14 0 19-69 34-69 15 0 20 45 35 45 14 0 19-22 33-22 15 0 20 35 34 35" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <svg viewBox="0 0 232 120" fill="none">
+            <rect x="1" y="1" width="230" height="118" rx="14" stroke="currentColor" opacity=".28"/>
+            <g opacity=".12" stroke="currentColor">
+              <path d="M32 8v104M64 8v104M96 8v104M128 8v104M160 8v104M192 8v104"/>
+            </g>
+            <g fill="currentColor">
+              <rect x="20" y="18" width="12" height="30" rx="6"/>
+              <rect x="40" y="12" width="12" height="44" rx="6" opacity=".75"/>
+              <rect x="60" y="30" width="12" height="24" rx="6"/>
+              <rect x="80" y="14" width="12" height="52" rx="6" opacity=".75"/>
+              <rect x="100" y="36" width="12" height="30" rx="6"/>
+              <rect x="120" y="16" width="12" height="42" rx="6" opacity=".75"/>
+              <rect x="140" y="44" width="12" height="20" rx="6"/>
+              <rect x="160" y="20" width="12" height="48" rx="6" opacity=".75"/>
+              <rect x="180" y="34" width="12" height="30" rx="6"/>
+              <rect x="200" y="14" width="12" height="50" rx="6" opacity=".75"/>
+            </g>
+            <rect x="10" y="92" width="212" height="3" rx="1.5" style="fill: var(--playback);"/>
+          </svg>
         </span>
         <div class="drop-zone__copy">
           <strong id="drop-title">Открыть аудиодорожку</strong>
-          <span id="drop-description">Перетащите файл или выберите с устройства</span>
+          <span id="drop-description">Перетащите файл или выберите с устройства — ноты появятся на падающей ленте над клавиатурой</span>
+          <span class="drop-zone__meta">MP3 · WAV · M4A&ensp;·&ensp;до 200 МБ&ensp;·&ensp;до 10 минут&ensp;·&ensp;файл не покидает устройство</span>
         </div>
-        <span class="drop-zone__cta">Выбрать файл <b aria-hidden="true">→</b></span>
-        <span class="drop-zone__meta">MP3 · WAV · M4A &nbsp; / &nbsp; до 200 МБ</span>
+        <span class="drop-zone__cta">${ICONS.upload}Выбрать файл</span>
+        <span class="drop-zone__progress" aria-hidden="true"><i></i></span>
       </div>
       <div class="error-message" id="error-message" role="alert" hidden>
+        ${ICONS.circleAlert}
         <span id="error-text"></span>
         <button class="button button--secondary" id="recovery-button" type="button">Выбрать другой файл</button>
       </div>
@@ -43,26 +74,65 @@ app.innerHTML = `
         <div class="player__deck">
           <div class="player__toolbar" aria-label="Действия с аудиофайлом">
             <div class="player__file">
-              <span class="player__file-icon" aria-hidden="true">♬</span>
+              <span class="player__file-icon" aria-hidden="true">${ICONS.fileMusic}</span>
               <strong id="file-name"></strong>
             </div>
             <div class="player__actions">
               <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
-              <label class="contrast-control" for="contrast">
-                <span class="contrast-control__label">Контраст нот</span>
-                <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст нот" aria-valuetext="Контраст: 1,4">
-                <output class="contrast-control__value" id="contrast-value" for="contrast">1,4×</output>
+              <label class="control-chip" for="playback-rate">
+                <span class="control-chip__label">Скорость</span>
+                <span class="control-chip__select">
+                  <select id="playback-rate" aria-label="Скорость воспроизведения" title="Скорость воспроизведения — высота звука сохраняется">
+                    <option value="0.2">0,2×</option>
+                    <option value="0.3">0,3×</option>
+                    <option value="0.4">0,4×</option>
+                    <option value="0.5">0,5×</option>
+                    <option value="0.6">0,6×</option>
+                    <option value="0.7">0,7×</option>
+                    <option value="0.8">0,8×</option>
+                    <option value="0.9">0,9×</option>
+                    <option value="1" selected>1×</option>
+                  </select>
+                  ${ICONS.chevronDown}
+                </span>
               </label>
+              <label class="control-chip control-chip--range" for="sensitivity">
+                <span class="control-chip__label">Чувствительность</span>
+                <input id="sensitivity" type="range" min="0" max="1" value="0.5" step="0.05" aria-label="Чувствительность анализа" aria-valuetext="Чувствительность: 50%" title="Выше — больше нот, ниже — строже отбор">
+                <output class="control-chip__value" id="sensitivity-value" for="sensitivity">50%</output>
+              </label>
+              <div class="analysis-settings" id="analysis-settings">
+                <button class="button button--neutral" id="settings-toggle" type="button" aria-expanded="false" aria-controls="analysis-settings-panel" aria-label="Настройки анализа" title="Настройки анализа">${ICONS.slidersHorizontal}<span class="button__label">Настройки</span></button>
+                <div class="analysis-settings__panel" id="analysis-settings-panel" role="group" aria-label="Настройки анализа" hidden>
+                  <label class="control-chip control-chip--range" for="min-note-ms">
+                    <span class="control-chip__label">Мин. длительность ноты</span>
+                    <input id="min-note-ms" type="range" min="50" max="500" value="150" step="10" aria-label="Минимальная длительность ноты" aria-valuetext="Минимальная длительность: 150 мс">
+                    <output class="control-chip__value" id="min-note-ms-value" for="min-note-ms">150 мс</output>
+                  </label>
+                  <label class="control-chip control-chip--range" for="max-notes">
+                    <span class="control-chip__label">Макс. нот одновременно</span>
+                    <input id="max-notes" type="range" min="1" max="8" value="8" step="1" aria-label="Максимум нот одновременно" aria-valuetext="Максимум одновременно: 8">
+                    <output class="control-chip__value" id="max-notes-value" for="max-notes">8</output>
+                  </label>
+                  <label class="control-chip control-chip--range" for="contrast">
+                    <span class="control-chip__label">Контраст нот</span>
+                    <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст нот — влияет только на отображение" aria-valuetext="Контраст: 1,4">
+                    <output class="control-chip__value" id="contrast-value" for="contrast">1,4×</output>
+                  </label>
+                  <p class="analysis-settings__hint">Применяются к быстрому анализу — ноты пересчитываются автоматически.</p>
+                </div>
+              </div>
               <div class="recognition-mode" id="recognition-mode" role="radiogroup" aria-label="Режим распознавания" hidden>
                 <button class="button recognition-mode__option recognition-mode__option--selected" id="instant-mode-button" type="button" role="radio" aria-checked="true" tabindex="0">Быстро</button>
                 <button class="button recognition-mode__option" id="precise-mode-button" type="button" role="radio" aria-checked="false" tabindex="-1">Точнее</button>
                 <p class="recognition-help" id="recognition-mode-hint"></p>
               </div>
-              <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить файл" title="Заменить файл"><span aria-hidden="true">↗</span><span class="button__label">Заменить файл</span></button>
+              <button class="button button--neutral" id="midi-download-button" type="button" aria-label="Скачать MIDI" title="Скачать результат точного анализа как MIDI-файл" hidden>${ICONS.download}<span class="button__label">MIDI</span></button>
+              <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить файл" title="Заменить файл">${ICONS.replace}<span class="button__label">Заменить файл</span></button>
             </div>
           </div>
           <div class="player__controls">
-            <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести"><span aria-hidden="true">▶</span></button>
+            <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести" title="Воспроизвести (Пробел)">${ICONS.play}</button>
             <span class="player__time" id="current-time">0:00</span>
             <div class="waveform-timeline">
               <canvas id="waveform" aria-hidden="true"></canvas>
@@ -73,14 +143,17 @@ app.innerHTML = `
         </div>
         <section class="piano-stage" data-following="true" aria-label="Навигация по партитуре">
           <div class="piano-stage__toolbar" role="toolbar" aria-label="Масштаб и диапазон партитуры">
-            <button class="piano-stage__button" id="zoom-out-button" type="button" aria-label="Уменьшить временной масштаб" title="Уменьшить временной масштаб">−</button>
-            <button class="piano-stage__button" id="zoom-in-button" type="button" aria-label="Увеличить временной масштаб" title="Увеличить временной масштаб">+</button>
-            <button class="piano-stage__button piano-stage__button--wide" id="pitch-range-button" type="button" aria-label="Изменить видимый диапазон клавиш" title="Изменить видимый диапазон клавиш">Клавиши</button>
-            <button class="piano-stage__button piano-stage__button--wide" id="follow-button" type="button" aria-label="Следование включено" aria-pressed="true" title="Следование включено">Следование включено</button>
+            <button class="piano-stage__button" id="zoom-out-button" type="button" aria-label="Уменьшить временной масштаб" title="Уменьшить временной масштаб">${ICONS.minus}</button>
+            <button class="piano-stage__button" id="zoom-in-button" type="button" aria-label="Увеличить временной масштаб" title="Увеличить временной масштаб">${ICONS.plus}</button>
+            <button class="piano-stage__button piano-stage__button--wide" id="pitch-range-button" type="button" aria-label="Изменить видимый диапазон клавиш" title="Изменить видимый диапазон клавиш">${ICONS.piano}<span>Диапазон</span></button>
+            <button class="piano-stage__button piano-stage__button--wide" id="follow-button" type="button" aria-label="Следование включено" aria-pressed="true" title="Следование включено">${ICONS.locateFixed}<span>Следование</span></button>
           </div>
-          <canvas id="piano-roll" tabindex="0" aria-label="Падающая партитура. Перетаскивайте для обзора, нажимайте для перехода к позиции и удерживайте, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд."></canvas>
+          <canvas id="piano-roll" tabindex="0" aria-label="Падающая партитура. Перетаскивайте для обзора, нажимайте для перехода к позиции и удерживайте, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд." aria-describedby="player-rail"></canvas>
         </section>
-        <div class="player__rail"><span>Перетащить — обзор · Нажать — позиция · Удерживать — нота</span><span class="player__rail-duration" id="rail-duration">0:00</span></div>
+        <div class="player__rail" id="player-rail">
+          <span class="player__rail-hints"><kbd>Space</kbd> пауза&ensp;·&ensp;<kbd>←</kbd><kbd>→</kbd> ±5&thinsp;с&ensp;·&ensp;перетащить — обзор&ensp;·&ensp;нажать — позиция&ensp;·&ensp;удерживать — нота</span>
+          <span class="player__rail-duration" id="rail-duration">0:00</span>
+        </div>
       </section>
     </section>
   </main>
@@ -103,7 +176,18 @@ const elements = {
   instantModeButton: requiredElement<HTMLButtonElement>('instant-mode-button'),
   preciseModeButton: requiredElement<HTMLButtonElement>('precise-mode-button'),
   recognitionModeHint: requiredElement<HTMLElement>('recognition-mode-hint'),
+  midiDownloadButton: requiredElement<HTMLButtonElement>('midi-download-button'),
   replaceButton: requiredElement<HTMLButtonElement>('replace-button'),
+  playbackRate: requiredElement<HTMLSelectElement>('playback-rate'),
+  sensitivity: requiredElement<HTMLInputElement>('sensitivity'),
+  sensitivityValue: requiredElement<HTMLOutputElement>('sensitivity-value'),
+  analysisSettings: requiredElement<HTMLElement>('analysis-settings'),
+  settingsToggle: requiredElement<HTMLButtonElement>('settings-toggle'),
+  settingsPanel: requiredElement<HTMLElement>('analysis-settings-panel'),
+  minNoteMs: requiredElement<HTMLInputElement>('min-note-ms'),
+  minNoteMsValue: requiredElement<HTMLOutputElement>('min-note-ms-value'),
+  maxNotes: requiredElement<HTMLInputElement>('max-notes'),
+  maxNotesValue: requiredElement<HTMLOutputElement>('max-notes-value'),
   contrast: requiredElement<HTMLInputElement>('contrast'),
   contrastValue: requiredElement<HTMLOutputElement>('contrast-value'),
   zoomOutButton: requiredElement<HTMLButtonElement>('zoom-out-button'),
@@ -123,6 +207,9 @@ const elements = {
 };
 
 const analysisClient = new AnalysisClient();
+const muscriptorClient = new AnalysisClient(
+  () => new Worker(new URL('./muscriptor-worker.ts', import.meta.url), { type: 'module' }),
+);
 const fastSpectrumClient = new FastSpectrumClient();
 const audioPlayer = new AudioPlayer();
 const pianoAudition = new PianoAudition();
@@ -141,6 +228,16 @@ let preciseAnalysisResult: AnalysisResult | null = null;
 let preciseAnalysisInProgress = false;
 let preciseAnalysisProgress = 0;
 let preciseModelReadyOnDevice = readPreciseModelReadyHint();
+let muscriptorUnavailable = false;
+let incrementalNotes: AnalyzedNote[] = [];
+let partialFrameTimestamps: Float32Array | null = null;
+let partialFrameProbabilities: Uint8Array | null = null;
+let analysisSensitivity = 0.5;
+let analysisMinNoteMs = 150;
+let analysisMaxNotesPerFrame = 8;
+let fastAnalysisRunning = false;
+let fastReanalyzePending = false;
+let reanalyzeTimer: number | null = null;
 
 audioPlayer.onStateChange = () => {
   if (disposed) {
@@ -272,6 +369,34 @@ for (const eventName of ['pointerup', 'pointercancel', 'change']) {
   });
 }
 
+elements.timeline.addEventListener('keydown', event => {
+  if (disposed || !isPlaybackReady()) {
+    return;
+  }
+  const seekOffset = event.key === 'ArrowLeft' ? -5 : event.key === 'ArrowRight' ? 5 : null;
+  if (seekOffset === null) {
+    return;
+  }
+  event.preventDefault();
+  audioPlayer.seek(audioPlayer.currentTimeSeconds + seekOffset);
+  updatePlaybackUi();
+  requestAnimation();
+});
+
+let playbackRatePointerActive = false;
+restorePlaybackRate();
+elements.playbackRate.addEventListener('pointerdown', () => {
+  playbackRatePointerActive = true;
+});
+elements.playbackRate.addEventListener('change', () => {
+  audioPlayer.setPlaybackRate(Number(elements.playbackRate.value));
+  persistPlaybackRate();
+  if (playbackRatePointerActive) {
+    elements.playbackRate.blur();
+  }
+  playbackRatePointerActive = false;
+});
+
 elements.canvas.addEventListener('keydown', event => {
   if (disposed || !isPlaybackReady()) {
     return;
@@ -332,6 +457,38 @@ elements.recognitionMode.addEventListener('keydown', event => {
   }
 });
 
+restoreAnalysisSettings();
+
+elements.sensitivity.addEventListener('input', () => {
+  analysisSensitivity = Number(elements.sensitivity.value);
+  const text = formatSensitivity(analysisSensitivity);
+  elements.sensitivityValue.value = text;
+  elements.sensitivityValue.textContent = text;
+  elements.sensitivity.setAttribute('aria-valuetext', `Чувствительность: ${text}`);
+  persistAnalysisSettings();
+  queueFastReanalyze();
+});
+
+elements.minNoteMs.addEventListener('input', () => {
+  analysisMinNoteMs = Number(elements.minNoteMs.value);
+  const text = `${analysisMinNoteMs} мс`;
+  elements.minNoteMsValue.value = text;
+  elements.minNoteMsValue.textContent = text;
+  elements.minNoteMs.setAttribute('aria-valuetext', `Минимальная длительность: ${text}`);
+  persistAnalysisSettings();
+  queueFastReanalyze();
+});
+
+elements.maxNotes.addEventListener('input', () => {
+  analysisMaxNotesPerFrame = Number(elements.maxNotes.value);
+  const text = String(analysisMaxNotesPerFrame);
+  elements.maxNotesValue.value = text;
+  elements.maxNotesValue.textContent = text;
+  elements.maxNotes.setAttribute('aria-valuetext', `Максимум одновременно: ${text}`);
+  persistAnalysisSettings();
+  queueFastReanalyze();
+});
+
 elements.contrast.addEventListener('input', () => {
   const contrast = Number(elements.contrast.value);
   renderer.setContrast(contrast);
@@ -339,6 +496,31 @@ elements.contrast.addEventListener('input', () => {
   elements.contrastValue.value = text;
   elements.contrastValue.textContent = text;
   elements.contrast.setAttribute('aria-valuetext', `Контраст: ${text}`);
+  persistContrastSetting();
+});
+
+elements.settingsToggle.addEventListener('click', () => {
+  if (!disposed) {
+    setSettingsOpen(elements.settingsPanel.hidden);
+  }
+});
+
+document.addEventListener('pointerdown', event => {
+  if (elements.settingsPanel.hidden) {
+    return;
+  }
+  if (event.target instanceof Node && elements.analysisSettings.contains(event.target)) {
+    return;
+  }
+  setSettingsOpen(false);
+});
+
+document.addEventListener('keydown', event => {
+  if (disposed || event.key !== 'Escape' || elements.settingsPanel.hidden) {
+    return;
+  }
+  setSettingsOpen(false);
+  elements.settingsToggle.focus();
 });
 
 elements.zoomOutButton.addEventListener('click', () => {
@@ -365,11 +547,26 @@ elements.followButton.addEventListener('click', () => {
   }
 });
 
+elements.midiDownloadButton.addEventListener('click', () => {
+  const midiBytes = preciseAnalysisResult?.midiBytes;
+  if (disposed || midiBytes === undefined) {
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([midiBytes], { type: 'audio/midi' }));
+  const link = document.createElement('a');
+  link.href = url;
+  const baseName = elements.fileName.textContent ?? 'transcription';
+  link.download = `${baseName.replace(/\.[^.]+$/, '') || 'transcription'}.mid`;
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
 window.addEventListener('beforeunload', () => {
   disposed = true;
   analysisGeneration += 1;
   cancelAnimation();
   analysisClient.dispose();
+  muscriptorClient.dispose();
   fastSpectrumClient.dispose();
   audioPlayer.dispose();
   pianoAudition.dispose();
@@ -383,6 +580,7 @@ async function loadFile(file: File): Promise<void> {
   }
   const generation = ++analysisGeneration;
   analysisClient.cancel();
+  muscriptorClient.cancel();
   fastSpectrumClient.cancel();
   audioPlayer.reset();
   renderer.clear();
@@ -390,10 +588,20 @@ async function loadFile(file: File): Promise<void> {
   cancelAnimation();
   decodedSamples = null;
   fullFastSpectrumReady = false;
+  fastReanalyzePending = false;
+  if (reanalyzeTimer !== null) {
+    window.clearTimeout(reanalyzeTimer);
+    reanalyzeTimer = null;
+  }
   fastAnalysisResult = null;
   preciseAnalysisResult = null;
   preciseAnalysisInProgress = false;
   preciseAnalysisProgress = 0;
+  muscriptorUnavailable = false;
+  incrementalNotes = [];
+  partialFrameTimestamps = null;
+  partialFrameProbabilities = null;
+  elements.midiDownloadButton.hidden = true;
   recognitionMode = RecognitionMode.Instant;
   renderer.setPreciseKeyHighlighting(false);
   elements.analysisStatus.textContent = '';
@@ -418,26 +626,32 @@ async function loadFile(file: File): Promise<void> {
     waveformTimeline.setSamples(decoded.samples, decoded.durationSeconds);
     elements.dropZone.hidden = true;
     setPhase(AnalysisPhase.FastAnalyzing);
-    const fastResult = await fastSpectrumClient.analyze(decoded.samples, {
-      onPreview: preview => {
-        if (generation !== analysisGeneration) {
-          return;
-        }
-        hasFastPreview = true;
-        renderer.setAnalysis(preview, decoded.durationSeconds);
-        elements.timeline.max = String(decoded.durationSeconds);
-        elements.timeline.value = '0';
-        elements.durationTime.textContent = formatTime(decoded.durationSeconds);
-        elements.railDuration.textContent = formatTime(decoded.durationSeconds);
-        elements.player.hidden = false;
-        setPhase(AnalysisPhase.PreviewReady);
-        elements.status.textContent = 'Первые ноты готовы. Продолжаем подготовку.';
-        updatePlaybackUi();
+    fastAnalysisRunning = true;
+    const fastResult = await fastSpectrumClient.analyze(
+      decoded.samples,
+      {
+        onPreview: preview => {
+          if (generation !== analysisGeneration) {
+            return;
+          }
+          hasFastPreview = true;
+          renderer.setAnalysis(preview, decoded.durationSeconds);
+          elements.timeline.max = String(decoded.durationSeconds);
+          elements.timeline.value = '0';
+          elements.durationTime.textContent = formatTime(decoded.durationSeconds);
+          elements.railDuration.textContent = formatTime(decoded.durationSeconds);
+          elements.player.hidden = false;
+          setPhase(AnalysisPhase.PreviewReady);
+          elements.status.textContent = 'Первые ноты готовы. Продолжаем подготовку.';
+          updatePlaybackUi();
+        },
       },
-    });
+      currentFastSpectrumOptions(),
+    );
     if (generation !== analysisGeneration) {
       return;
     }
+    fastAnalysisRunning = false;
     hasFullFastSpectrum = true;
     fullFastSpectrumReady = true;
 
@@ -450,7 +664,14 @@ async function loadFile(file: File): Promise<void> {
     elements.player.hidden = false;
     setPhase(AnalysisPhase.FastReady);
     updatePlaybackUi();
+    if (fastReanalyzePending) {
+      fastReanalyzePending = false;
+      queueFastReanalyze();
+    }
   } catch (error) {
+    if (generation === analysisGeneration) {
+      fastAnalysisRunning = false;
+    }
     if (generation !== analysisGeneration || isCancelled(error)) {
       return;
     }
@@ -462,12 +683,116 @@ async function loadFile(file: File): Promise<void> {
     if (isPlaybackReady() && hasFastPreview) {
       setPhase(AnalysisPhase.PreviewReady);
       elements.status.textContent = 'Первые ноты готовы. Полная лента сейчас недоступна.';
+      if (fastReanalyzePending) {
+        fastReanalyzePending = false;
+        queueFastReanalyze();
+      }
       return;
     }
     elements.dropZone.hidden = false;
     setPhase(AnalysisPhase.Failed);
     showError(toErrorMessage(error));
   }
+}
+
+function currentFastSpectrumOptions(): FastSpectrumOptions {
+  return {
+    sensitivity: analysisSensitivity,
+    minNoteMs: analysisMinNoteMs,
+    maxNotesPerFrame: analysisMaxNotesPerFrame,
+  };
+}
+
+function queueFastReanalyze(): void {
+  if (disposed) {
+    return;
+  }
+  // The initial analyze in loadFile owns the worker — never cancel it from
+  // here; run after it settles instead (loadFile consumes the flag).
+  if (decodedSamples !== null && fastAnalysisRunning) {
+    fastReanalyzePending = true;
+    return;
+  }
+  if (decodedSamples === null || !isPlaybackReady()) {
+    return;
+  }
+  if (reanalyzeTimer !== null) {
+    window.clearTimeout(reanalyzeTimer);
+  }
+  reanalyzeTimer = window.setTimeout(() => {
+    reanalyzeTimer = null;
+    void reanalyzeFastSpectrum();
+  }, 220);
+}
+
+async function reanalyzeFastSpectrum(): Promise<void> {
+  const samples = decodedSamples;
+  if (disposed || samples === null || fastAnalysisRunning || !isPlaybackReady()) {
+    return;
+  }
+  const generation = analysisGeneration;
+  fastSpectrumClient.cancel();
+  elements.analysisStatus.textContent = 'Обновляем ноты';
+  elements.analysisStatus.removeAttribute('title');
+  elements.analysisStatus.removeAttribute('aria-label');
+  elements.analysisStatus.dataset.busy = 'true';
+  elements.status.textContent = 'Обновляем ноты с новыми настройками.';
+  try {
+    const result = await fastSpectrumClient.analyze(
+      samples,
+      {
+        onPreview: preview => {
+          if (
+            disposed ||
+            generation !== analysisGeneration ||
+            recognitionMode !== RecognitionMode.Instant
+          ) {
+            return;
+          }
+          renderer.setAnalysisPreservingViewport(preview, audioPlayer.durationSeconds);
+        },
+      },
+      currentFastSpectrumOptions(),
+    );
+    if (disposed || generation !== analysisGeneration) {
+      return;
+    }
+    fastAnalysisResult = result;
+    fullFastSpectrumReady = true;
+    if (recognitionMode === RecognitionMode.Instant) {
+      renderer.setAnalysisPreservingViewport(result, audioPlayer.durationSeconds);
+    }
+    restoreReadyPhase();
+    elements.status.textContent = 'Ноты обновлены с новыми настройками.';
+    updatePlaybackUi();
+  } catch (error) {
+    if (disposed || generation !== analysisGeneration || isCancelled(error)) {
+      return;
+    }
+    console.error('Пересчёт быстрого анализа не удался:', error);
+    restoreReadyPhase();
+    showError('Не удалось пересчитать ноты с новыми настройками. Показан прежний вариант.');
+    elements.status.textContent = 'Не удалось обновить ноты.';
+  }
+}
+
+function restoreReadyPhase(): void {
+  if (recognitionMode === RecognitionMode.Precise) {
+    if (preciseAnalysisInProgress) {
+      setPhase(AnalysisPhase.Refining, preciseAnalysisProgress);
+      return;
+    }
+    if (preciseAnalysisResult !== null) {
+      setPhase(AnalysisPhase.Complete);
+      return;
+    }
+  }
+  setPhase(fullFastSpectrumReady ? AnalysisPhase.FastReady : AnalysisPhase.PreviewReady);
+}
+
+function setSettingsOpen(open: boolean): void {
+  elements.settingsPanel.hidden = !open;
+  elements.settingsToggle.setAttribute('aria-expanded', String(open));
 }
 
 function selectRecognitionMode(nextMode: RecognitionMode): void {
@@ -495,6 +820,10 @@ function selectRecognitionMode(nextMode: RecognitionMode): void {
   }
 
   if (preciseAnalysisInProgress) {
+    const partial = buildPartialResult();
+    if (partial !== null) {
+      renderer.setAnalysisPreservingViewport(partial, audioPlayer.durationSeconds);
+    }
     setPhase(AnalysisPhase.Refining, preciseAnalysisProgress);
     return;
   }
@@ -516,25 +845,19 @@ async function refineWithModel(): Promise<void> {
   const generation = analysisGeneration;
   preciseAnalysisInProgress = true;
   preciseAnalysisProgress = 0;
+  incrementalNotes = [];
+  partialFrameTimestamps = null;
+  partialFrameProbabilities = null;
   clearError();
   setPhase(AnalysisPhase.Refining, 0);
   try {
-    const result = await analysisClient.analyze(samples.slice(), {
-      onProgress: progress => {
-        if (generation === analysisGeneration) {
-          preciseAnalysisProgress = progress;
-          if (recognitionMode !== RecognitionMode.Precise) {
-            return;
-          }
-          setPhase(AnalysisPhase.Refining, progress);
-        }
-      },
-    });
+    const result = await runPreciseAnalysis(samples, generation);
     if (disposed || generation !== analysisGeneration) {
       return;
     }
     preciseAnalysisInProgress = false;
     preciseAnalysisResult = result;
+    elements.midiDownloadButton.hidden = result.midiBytes === undefined;
     persistPreciseModelReadyHint();
     if (recognitionMode === RecognitionMode.Precise) {
       renderer.setPreciseKeyHighlighting(true);
@@ -548,6 +871,7 @@ async function refineWithModel(): Promise<void> {
     if (disposed || generation !== analysisGeneration || isCancelled(error)) {
       return;
     }
+    console.error('Точный анализ не удался:', error);
     preciseAnalysisInProgress = false;
     recognitionMode = RecognitionMode.Instant;
     renderer.setPreciseKeyHighlighting(false);
@@ -558,6 +882,122 @@ async function refineWithModel(): Promise<void> {
     showError('Не удалось подготовить точные ноты. Показан быстрый вариант — можно продолжать слушать запись.');
     elements.status.textContent = 'Точный вариант не готов. Быстрый вариант сохранён.';
   }
+}
+
+async function runPreciseAnalysis(samples: Float32Array, generation: number): Promise<AnalysisResult> {
+  if (!muscriptorUnavailable) {
+    try {
+      return await muscriptorClient.analyze(samples.slice(), {
+        onProgress: (progress, notes, stage) => {
+          if (generation !== analysisGeneration) {
+            return;
+          }
+          preciseAnalysisProgress = progress;
+          if (notes !== undefined && notes.length > 0) {
+            pushIncrementalNotes(notes);
+            if (recognitionMode === RecognitionMode.Precise) {
+              const partial = buildPartialResult();
+              if (partial !== null) {
+                renderer.setAnalysisPreservingViewport(partial, audioPlayer.durationSeconds);
+              }
+            }
+          }
+          if (recognitionMode !== RecognitionMode.Precise) {
+            return;
+          }
+          const stageLabel = stage === 'model'
+            ? 'Скачиваем модель'
+            : stage === 'prepare'
+              ? 'Готовим модель'
+              : 'Распознаём ноты';
+          setPhase(AnalysisPhase.Refining, progress, stageLabel);
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof AnalysisClientError &&
+        (error.code === AnalysisErrorCode.BackendUnavailable ||
+          error.code === AnalysisErrorCode.ModelLoadFailed ||
+          error.code === AnalysisErrorCode.WorkerFailed)
+      ) {
+        console.error('MuScriptor недоступен, переключаюсь на быстрый движок:', error.message);
+        muscriptorUnavailable = true;
+      } else {
+        throw error;
+      }
+    }
+  }
+  return analysisClient.analyze(samples.slice(), {
+    onProgress: progress => {
+      if (generation === analysisGeneration) {
+        preciseAnalysisProgress = progress;
+        if (recognitionMode !== RecognitionMode.Precise) {
+          return;
+        }
+        setPhase(AnalysisPhase.Refining, progress);
+      }
+    },
+  });
+}
+
+const PARTIAL_FRAMES_PER_SECOND = 22050 / 256;
+const PARTIAL_PITCH_COUNT = 88;
+const PARTIAL_BASE_PITCH = 21;
+
+function pushIncrementalNotes(notes: AnalyzedNote[]): void {
+  const durationSeconds = audioPlayer.durationSeconds;
+  if (durationSeconds <= 0) {
+    return;
+  }
+  const frameCount = Math.max(1, Math.ceil(durationSeconds * PARTIAL_FRAMES_PER_SECOND));
+  let reallocated = false;
+  if (partialFrameTimestamps === null || partialFrameTimestamps.length !== frameCount) {
+    partialFrameTimestamps = new Float32Array(frameCount);
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      partialFrameTimestamps[frame] = frame / PARTIAL_FRAMES_PER_SECOND;
+    }
+    partialFrameProbabilities = new Uint8Array(frameCount * PARTIAL_PITCH_COUNT);
+    reallocated = true;
+  }
+  const probabilities = partialFrameProbabilities;
+  if (probabilities === null) {
+    return;
+  }
+  const toMark = reallocated ? incrementalNotes.concat(notes) : notes;
+  for (const note of toMark) {
+    const startFrame = Math.max(0, Math.floor(note.startTimeSeconds * PARTIAL_FRAMES_PER_SECOND));
+    const endFrame = Math.min(
+      frameCount,
+      Math.max(startFrame + 1, Math.ceil(note.endTimeSeconds * PARTIAL_FRAMES_PER_SECOND)),
+    );
+    note.startFrame = startFrame;
+    note.endFrame = endFrame;
+    const row = note.pitchMidi - PARTIAL_BASE_PITCH;
+    if (row < 0 || row >= PARTIAL_PITCH_COUNT) {
+      continue;
+    }
+    const amplitude = Math.round(Math.max(0, Math.min(1, note.amplitude)) * 255);
+    for (let frame = startFrame; frame < endFrame; frame += 1) {
+      const index = frame * PARTIAL_PITCH_COUNT + row;
+      if (amplitude > probabilities[index]) {
+        probabilities[index] = amplitude;
+      }
+    }
+  }
+  incrementalNotes.push(...notes);
+}
+
+function buildPartialResult(): AnalysisResult | null {
+  if (partialFrameTimestamps === null || partialFrameProbabilities === null) {
+    return null;
+  }
+  return {
+    notes: incrementalNotes,
+    frameCount: partialFrameTimestamps.length,
+    pitchCount: PARTIAL_PITCH_COUNT,
+    frameProbabilities: partialFrameProbabilities,
+    frameTimestamps: partialFrameTimestamps,
+  };
 }
 
 async function startPlayback(): Promise<void> {
@@ -582,7 +1022,7 @@ async function startPlayback(): Promise<void> {
   }
 }
 
-function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
+function setPhase(nextPhase: AnalysisPhase, progress = 0, label = 'Распознаём ноты'): void {
   phase = nextPhase;
   elements.workspace.dataset.state = phase === AnalysisPhase.Loading || phase === AnalysisPhase.FastAnalyzing ? 'loading' : 'ready';
   elements.workspace.setAttribute(
@@ -618,11 +1058,11 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     elements.status.textContent = 'Быстрый вариант готов. Можно воспроизводить и перематывать.';
   } else if (phase === AnalysisPhase.Refining) {
     const percentage = Math.round(progress * 100);
-    elements.analysisStatus.textContent = `Распознаём ноты: ${percentage}%`;
+    elements.analysisStatus.textContent = `${label}: ${percentage}%`;
     elements.analysisStatus.removeAttribute('title');
     elements.analysisStatus.removeAttribute('aria-label');
     elements.recognitionMode.hidden = false;
-    elements.status.textContent = `Распознаём ноты: ${percentage}%.`;
+    elements.status.textContent = `${label}: ${percentage}%.`;
   } else if (phase === AnalysisPhase.Complete) {
     setReadyAnalysisStatus('Точный вариант готов');
     elements.recognitionMode.hidden = false;
@@ -633,17 +1073,26 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0): void {
     elements.dropDescription.textContent = 'Попробуйте выбрать другой аудиофайл';
     elements.status.textContent = 'Не удалось обработать файл.';
   }
+  elements.analysisStatus.dataset.busy = String(
+    phase === AnalysisPhase.PreviewReady || phase === AnalysisPhase.Refining,
+  );
   updateRecognitionModeUi();
 }
+
+let playIconPlaying: boolean | null = null;
 
 function updatePlaybackUi(): void {
   if (!isPlaybackReady()) {
     return;
   }
   const currentTime = audioPlayer.currentTimeSeconds;
-  elements.playButton.innerHTML = `<span aria-hidden="true">${audioPlayer.isPlaying ? 'Ⅱ' : '▶'}</span>`;
-  elements.playButton.setAttribute('aria-label', audioPlayer.isPlaying ? 'Пауза' : 'Воспроизвести');
-  elements.playButton.title = audioPlayer.isPlaying ? 'Пауза' : 'Воспроизвести';
+  if (playIconPlaying !== audioPlayer.isPlaying) {
+    playIconPlaying = audioPlayer.isPlaying;
+    elements.playButton.innerHTML = playIconPlaying ? ICONS.pause : ICONS.play;
+    const playCopy = playIconPlaying ? 'Пауза' : 'Воспроизвести';
+    elements.playButton.setAttribute('aria-label', playCopy);
+    elements.playButton.title = `${playCopy} (Пробел)`;
+  }
   elements.timeline.value = String(currentTime);
   elements.currentTime.textContent = formatTime(currentTime);
   elements.durationTime.textContent = formatTime(audioPlayer.durationSeconds);
@@ -653,8 +1102,9 @@ function updatePlaybackUi(): void {
 }
 
 function updateFollowUi(following: boolean): void {
-  const copy = following ? 'Следование включено' : 'Следовать';
-  elements.followButton.textContent = copy;
+  const label = following ? 'Следование' : 'К позиции';
+  const copy = following ? 'Следование включено' : 'Вернуться к позиции воспроизведения';
+  elements.followButton.innerHTML = `${ICONS.locateFixed}<span>${label}</span>`;
   elements.followButton.setAttribute('aria-label', copy);
   elements.followButton.title = copy;
   elements.followButton.setAttribute('aria-pressed', String(following));
@@ -757,6 +1207,10 @@ function formatContrast(value: number): string {
   return `${value.toFixed(2).replace(/0$/, '').replace('.', ',')}×`;
 }
 
+function formatSensitivity(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
 function updateRecognitionModeUi(): void {
   const isInstant = recognitionMode === RecognitionMode.Instant;
   const canUseModes = fullFastSpectrumReady && fastAnalysisResult !== null;
@@ -771,15 +1225,15 @@ function updateRecognitionModeUi(): void {
   const preciseModelReadyText = 'Точный анализ уже использовался на этом устройстве — повторная загрузка обычно не нужна.';
   elements.recognitionModeHint.textContent = preciseModelReadyOnDevice
     ? ''
-    : 'Первый точный анализ может занять несколько минут и скачает модель распознавания — около 0,9 МБ.';
+    : 'Первый точный анализ скачает модель MuScriptor — около 400 МБ, дальше она берётся из кэша.';
   elements.preciseModeButton.title = preciseModelReadyOnDevice
     ? `Точнее. ${preciseModelReadyText}`
     : 'Точнее';
 }
 
 function setReadyAnalysisStatus(label: string): void {
-  elements.analysisStatus.textContent = '';
-  elements.analysisStatus.title = label;
+  elements.analysisStatus.textContent = label;
+  elements.analysisStatus.removeAttribute('title');
   elements.analysisStatus.setAttribute('aria-label', label);
 }
 
@@ -787,10 +1241,14 @@ function isInteractiveElement(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) {
     return false;
   }
-  return (
-    target.closest('input, button, textarea, select, [role="button"]') !== null ||
+  if (
+    target.closest('button, textarea, select, [role="button"]') !== null ||
     target.closest('[contenteditable]:not([contenteditable="false"])') !== null
-  );
+  ) {
+    return true;
+  }
+  const input = target.closest('input');
+  return input !== null && input.type !== 'range';
 }
 
 function readPreciseModelReadyHint(): boolean {
@@ -805,6 +1263,112 @@ function persistPreciseModelReadyHint(): void {
   preciseModelReadyOnDevice = true;
   try {
     localStorage['pianorolltranscribe.precise-model-ready'] = '1';
+  } catch {
+    return;
+  }
+}
+
+function restorePlaybackRate(): void {
+  let stored: unknown;
+  try {
+    stored = localStorage['pianorolltranscribe.playback-rate'];
+  } catch {
+    return;
+  }
+  if (typeof stored !== 'string') {
+    return;
+  }
+  const isSupported = Array.from(elements.playbackRate.options).some(
+    option => option.value === stored,
+  );
+  if (!isSupported) {
+    return;
+  }
+  elements.playbackRate.value = stored;
+  audioPlayer.setPlaybackRate(Number(stored));
+}
+
+function persistPlaybackRate(): void {
+  try {
+    localStorage['pianorolltranscribe.playback-rate'] = elements.playbackRate.value;
+  } catch {
+    return;
+  }
+}
+
+function restoreAnalysisSettings(): void {
+  let sensitivity: unknown;
+  let minNoteMs: unknown;
+  let maxNotes: unknown;
+  let contrast: unknown;
+  try {
+    sensitivity = localStorage['pianorolltranscribe.sensitivity'];
+    minNoteMs = localStorage['pianorolltranscribe.min-note-ms'];
+    maxNotes = localStorage['pianorolltranscribe.max-notes'];
+    contrast = localStorage['pianorolltranscribe.contrast'];
+  } catch {
+    return;
+  }
+  if (typeof sensitivity === 'string') {
+    const value = Number(sensitivity);
+    if (Number.isFinite(value)) {
+      elements.sensitivity.value = String(Math.min(1, Math.max(0, value)));
+      analysisSensitivity = Number(elements.sensitivity.value);
+      const text = formatSensitivity(analysisSensitivity);
+      elements.sensitivityValue.value = text;
+      elements.sensitivityValue.textContent = text;
+      elements.sensitivity.setAttribute('aria-valuetext', `Чувствительность: ${text}`);
+    }
+  }
+  if (typeof minNoteMs === 'string') {
+    const value = Number(minNoteMs);
+    if (Number.isFinite(value)) {
+      elements.minNoteMs.value = String(Math.min(500, Math.max(50, value)));
+      analysisMinNoteMs = Number(elements.minNoteMs.value);
+      const text = `${analysisMinNoteMs} мс`;
+      elements.minNoteMsValue.value = text;
+      elements.minNoteMsValue.textContent = text;
+      elements.minNoteMs.setAttribute('aria-valuetext', `Минимальная длительность: ${text}`);
+    }
+  }
+  if (typeof maxNotes === 'string') {
+    const value = Number(maxNotes);
+    if (Number.isFinite(value)) {
+      elements.maxNotes.value = String(Math.min(8, Math.max(1, Math.round(value))));
+      analysisMaxNotesPerFrame = Number(elements.maxNotes.value);
+      const text = String(analysisMaxNotesPerFrame);
+      elements.maxNotesValue.value = text;
+      elements.maxNotesValue.textContent = text;
+      elements.maxNotes.setAttribute('aria-valuetext', `Максимум одновременно: ${text}`);
+    }
+  }
+  if (typeof contrast === 'string') {
+    const value = Number(contrast);
+    if (Number.isFinite(value)) {
+      elements.contrast.value = String(Math.min(2.2, Math.max(0.7, value)));
+      const applied = Number(elements.contrast.value);
+      renderer.setContrast(applied);
+      const text = formatContrast(applied);
+      elements.contrastValue.value = text;
+      elements.contrastValue.textContent = text;
+      elements.contrast.setAttribute('aria-valuetext', `Контраст: ${text}`);
+    }
+  }
+}
+
+function persistAnalysisSettings(): void {
+  try {
+    localStorage['pianorolltranscribe.sensitivity'] = String(analysisSensitivity);
+    localStorage['pianorolltranscribe.min-note-ms'] = String(analysisMinNoteMs);
+    localStorage['pianorolltranscribe.max-notes'] = String(analysisMaxNotesPerFrame);
+  } catch {
+    return;
+  }
+}
+
+function persistContrastSetting(): void {
+  try {
+    localStorage['pianorolltranscribe.contrast'] = elements.contrast.value;
   } catch {
     return;
   }
