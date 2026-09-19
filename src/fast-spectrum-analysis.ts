@@ -96,6 +96,12 @@ export class FastSpectrumAnalyzer {
   private readonly partialWeights = new Float32Array(MAX_PARTIALS);
   private readonly partialBins = new Float32Array(MAX_PARTIALS);
   private readonly partialHarmonics = new Uint8Array(MAX_PARTIALS);
+  private readonly verifyResidual = new Float32Array(BIN_COUNT);
+  private readonly acceptedPitches = new Uint8Array(MAX_NOTES_PER_FRAME);
+  private readonly acceptedSteps = new Int8Array(MAX_NOTES_PER_FRAME);
+  private readonly acceptedPositions = new Float32Array(
+    MAX_NOTES_PER_FRAME * MAX_PARTIALS,
+  );
   private hasPreviousPhase = false;
 
   public constructor(private readonly samples: Float32Array) {
@@ -158,7 +164,9 @@ export class FastSpectrumAnalyzer {
     const frameOffset = frame * PITCH_COUNT;
     this.energies.fill(0, frameOffset, frameOffset + PITCH_COUNT);
     const used = this.used.fill(0);
+    const { acceptedPitches, acceptedSteps, acceptedPositions } = this;
     let firstScore = 0;
+    let accepted = 0;
 
     for (let iteration = 0; iteration < MAX_NOTES_PER_FRAME; iteration += 1) {
       const best = this.scoreCandidates(used);
@@ -172,11 +180,50 @@ export class FastSpectrumAnalyzer {
         firstScore = best.score;
       }
       used[best.pitch] = 1;
+      const positions = this.refinePositions(best.pitch, best.step);
+      acceptedPitches[accepted] = best.pitch;
+      acceptedSteps[accepted] = best.step;
+      acceptedPositions.set(positions.subarray(0, PARTIAL_LAYOUT.counts[best.pitch]), accepted * MAX_PARTIALS);
       this.energies[frameOffset + best.pitch] = Math.max(
         this.energies[frameOffset + best.pitch],
         Math.log1p(best.score * 4),
       );
-      this.cancelNote(best.pitch, best.step, this.refinePositions(best.pitch, best.step));
+      this.cancelNote(best.pitch, positions, residual);
+      accepted += 1;
+    }
+
+    if (accepted > 1) {
+      this.verifyAccepted(accepted, frameOffset);
+    }
+  }
+
+  /**
+   * Independence check: rebuild a residual with every *other* accepted note's
+   * footprint removed and re-score each candidate on it. A ghost whose
+   * partials were entirely explained by stronger relatives loses its evidence
+   * and its energy collapses; a real note keeps its own f1/f2 slots.
+   */
+  private verifyAccepted(accepted: number, frameOffset: number): void {
+    const { whitened, verifyResidual, acceptedPitches, acceptedSteps, acceptedPositions } = this;
+    for (let index = 0; index < accepted; index += 1) {
+      verifyResidual.set(whitened);
+      for (let other = 0; other < accepted; other += 1) {
+        if (other !== index) {
+          this.cancelNote(
+            acceptedPitches[other],
+            acceptedPositions.subarray(other * MAX_PARTIALS, other * MAX_PARTIALS + MAX_PARTIALS),
+            verifyResidual,
+          );
+        }
+      }
+      const verified = this.salience(
+        acceptedPitches[index],
+        acceptedSteps[index],
+        PARTIAL_LAYOUT,
+        verifyResidual,
+      );
+      const slot = frameOffset + acceptedPitches[index];
+      this.energies[slot] = Math.min(this.energies[slot], Math.log1p(Math.max(0, verified) * 4));
     }
   }
 
@@ -253,7 +300,7 @@ export class FastSpectrumAnalyzer {
     for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
       const score = used[pitch] !== 0
         ? 0
-        : this.salience(pitch, 2, layout);
+        : this.salience(pitch, 2, layout, this.residual);
       candidateScores[pitch] = score;
       candidateSteps[pitch] = 2;
       if (score > bestCoarse) {
@@ -283,7 +330,7 @@ export class FastSpectrumAnalyzer {
         if (step === 2) {
           continue;
         }
-        const score = this.salience(pitch, step, layout);
+        const score = this.salience(pitch, step, layout, this.residual);
         if (score > candidateScores[pitch]) {
           candidateScores[pitch] = score;
           candidateSteps[pitch] = step;
@@ -298,13 +345,18 @@ export class FastSpectrumAnalyzer {
     return { pitch: bestPitch, step: bestStep, score: bestScore };
   }
 
-  private salience(pitch: number, step: number, layout: PartialLayout): number {
+  private salience(
+    pitch: number,
+    step: number,
+    layout: PartialLayout,
+    spectrum: Float32Array,
+  ): number {
     const count = layout.counts[pitch];
     if (count === 0) {
       return 0;
     }
     const base = (pitch * DETUNE_STEP_COUNT + step) * MAX_PARTIALS;
-    const { residual, snapPosition } = this;
+    const { snapPosition } = this;
     let sum = 0;
     for (let n = 0; n < count; n += 1) {
       const weight = layout.weights[n];
@@ -312,8 +364,8 @@ export class FastSpectrumAnalyzer {
       const bin = Math.min(BIN_COUNT - 1, Math.max(0, Math.round(position)));
       const snap = snapPosition[bin];
       const amplitude = snap >= 0
-        ? interpolate(residual, snap)
-        : interpolate(residual, position) * PARTIAL_FALLBACK_WEIGHT;
+        ? interpolate(spectrum, snap)
+        : interpolate(spectrum, position) * PARTIAL_FALLBACK_WEIGHT;
       const excess = amplitude - NOISE_FLOOR;
       // A missing fundamental costs its whole weight — a note whose f1 slot is
       // empty is usually a harmonic of something else, not a played key.
@@ -323,20 +375,24 @@ export class FastSpectrumAnalyzer {
     return sum;
   }
 
-  private cancelNote(pitch: number, step: number, positions: Float32Array): void {
+  private cancelNote(
+    pitch: number,
+    positions: Float32Array,
+    spectrum: Float32Array,
+  ): void {
     const count = PARTIAL_LAYOUT.counts[pitch];
-    const { residual, snapPosition } = this;
+    const { snapPosition } = this;
 
     for (let n = 0; n < count; n += 1) {
       const position = positions[n];
       const bin = Math.min(BIN_COUNT - 1, Math.max(0, Math.round(position)));
       const center = snapPosition[bin] >= 0 ? snapPosition[bin] : position;
-      const amplitude = interpolate(residual, center);
+      const amplitude = interpolate(spectrum, center);
       const first = Math.max(0, Math.floor(center - CANCEL_FOOTPRINT_BINS));
       const last = Math.min(BIN_COUNT - 1, Math.ceil(center + CANCEL_FOOTPRINT_BINS));
       for (let k = first; k <= last; k += 1) {
         const shape = 1 - Math.abs(k - center) / CANCEL_FOOTPRINT_BINS;
-        residual[k] = Math.max(NOISE_FLOOR, residual[k] - amplitude * shape);
+        spectrum[k] = Math.max(NOISE_FLOOR, spectrum[k] - amplitude * shape);
       }
     }
   }
