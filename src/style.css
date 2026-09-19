@@ -144,6 +144,13 @@ h1 {
 
 .workspace { display: grid; gap: 14px; }
 
+/* Empty state: center the drop card in the viewport instead of leaving
+   dead space below it. */
+.workspace:not(:has(.player:not([hidden]))) {
+  align-content: center;
+  min-height: calc(100dvh - 130px);
+}
+
 /* ── Drop zone ─────────────────────────────────────────── */
 
 .drop-zone {
@@ -718,6 +725,7 @@ h1 {
 
 @media (pointer: coarse) {
   .button, .control-chip, .recognition-mode__option { min-height: 44px; }
+  .button { min-width: 44px; justify-content: center; }
   .piano-stage__button { min-width: 44px; min-height: 44px; }
   .play-button { width: 44px; height: 44px; }
   .control-chip input[type="range"] { height: 34px; }
@@ -734,15 +742,20 @@ h1 {
   .drop-zone__motif { max-width: 190px; }
   .drop-zone__cta { justify-self: start; }
   .error-message { align-items: flex-start; flex-wrap: wrap; }
-  .player__toolbar { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .player__toolbar { align-items: flex-start; flex-direction: column; gap: 8px; padding: 10px 12px; }
   .player__file { width: 100%; }
   .player__actions { width: 100%; justify-content: flex-start; }
   .recognition-mode { width: 100%; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .recognition-mode__option { justify-content: center; }
-  .recognition-help { left: 0; right: 0; width: auto; max-width: none; }
-  .analysis-settings__panel { left: 0; right: auto; width: min(320px, calc(100vw - 40px)); }
-  .control-chip { flex: 1 1 auto; justify-content: space-between; }
+  /* Back in flow on mobile: a floating card here would cover the buttons
+     that wrap below the mode toggle. */
+  .recognition-help { position: static; grid-column: 1 / -1; width: auto; max-width: none; box-shadow: none; }
+  /* Right-anchor to the button — left-anchored would overflow the viewport. */
+  .analysis-settings__panel { right: 0; left: auto; width: min(320px, calc(100vw - 40px)); }
+  .control-chip { flex: 1 1 calc(50% - 4px); justify-content: space-between; }
   .control-chip input[type="range"] { width: 72px; flex: 0 1 auto; }
+  /* Keyboard hints are useless on a touch screen. */
+  .player__rail-hints { display: none; }
   .player__controls { grid-template-columns: max-content max-content minmax(0, 1fr) max-content; gap: 9px; padding: 10px 10px 12px; }
   .waveform-timeline { height: 64px; }
   #timeline::-webkit-slider-thumb { height: 48px; margin-top: 8px; }

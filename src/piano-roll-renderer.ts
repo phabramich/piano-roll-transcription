@@ -571,7 +571,9 @@ export class PianoRollRenderer {
       if (width >= labelWidth + 12) {
         const labelX = width - labelWidth - 6;
         const labelY = clamp(clampedY, 9, rollHeight - 9);
-        context.fillRect(labelX, labelY - 8, labelWidth, 16);
+        context.beginPath();
+        context.roundRect(labelX, labelY - 8, labelWidth, 16, 8);
+        context.fill();
         context.fillStyle = DESIGN_COLORS.playheadText;
         context.fillText(label, labelX + 5, labelY);
       }
@@ -611,6 +613,7 @@ export class PianoRollRenderer {
 
   private readonly handlePointerDown = (event: PointerEvent): void => {
     event.preventDefault();
+    this.canvas.focus({ preventScroll: true });
     const rect = this.canvas.getBoundingClientRect();
     this.canvas.setPointerCapture(event.pointerId);
     this.onPianoKeyPrepare?.();
