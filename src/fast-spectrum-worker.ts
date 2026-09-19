@@ -1,5 +1,6 @@
 import { AnalysisErrorCode, type AnalysisResult } from './analysis-types';
 import { FastSpectrumAnalyzer } from './fast-spectrum-analysis';
+import type { FastSpectrumOptions } from './fast-spectrum-analysis';
 import {
   FastSpectrumWorkerMessageType,
   type FastSpectrumAnalyzeRequest,
@@ -21,6 +22,9 @@ self.addEventListener('message', (event: MessageEvent<FastSpectrumAnalyzeRequest
 
   try {
     const analyzer = new FastSpectrumAnalyzer(request.samples);
+    // `options` is added to the request in parallel — read it defensively so
+    // this compiles and runs whether or not the field is present yet.
+    analyzer.configure((request as { options?: FastSpectrumOptions }).options ?? {});
     const previewFrameCount = analyzer.frameCountForSeconds(30);
     analyzer.analyzeFrames(0, previewFrameCount);
     postPreview(request.jobId, analyzer.toResult(previewFrameCount));

@@ -84,7 +84,10 @@ const FLUX_PHASE_SCALE = 30;
 // whose *mean* intensity stays faint is a ghost track, not a played note.
 const NOTE_ON_RATIO = 0.3;
 const NOTE_OFF_RATIO = 0.18;
-const NOTE_MIN_FRAMES = 2;
+// Minimum note duration, in ms so callers speak in real time. ~150 ms
+// rounds up to the same 2 frames the old NOTE_MIN_FRAMES = 2 floor used
+// (one hop = 2048 / 22050 ≈ 92.9 ms).
+const NOTE_MIN_MS = 150;
 const NOTE_MIN_MEAN_RATIO = 0.35;
 const NOTE_ONSET_DIP = 0.6;
 const NOTE_ONSET_RISE = 1.15;
@@ -108,6 +111,18 @@ interface PartialLayout {
 }
 
 const PARTIAL_LAYOUT = createPartialLayout();
+
+/**
+ * Runtime tuning knobs — every field optional; omitted values reproduce the
+ * constant-driven behaviour the pipeline was tuned on. sensitivity 0.5 is
+ * the neutral point (0 stricter, 1 more permissive); minNoteMs is the
+ * minimum note duration; maxNotesPerFrame caps polyphony at 1..8.
+ */
+export interface FastSpectrumOptions {
+  sensitivity?: number;
+  minNoteMs?: number;
+  maxNotesPerFrame?: number;
+}
 
 export class FastSpectrumAnalyzer {
   public readonly frameCount: number;
@@ -154,6 +169,14 @@ export class FastSpectrumAnalyzer {
   private readonly nmfNorm = new Float32Array(MAX_NOTES_PER_FRAME);
   private hasPreviousPhase = false;
   private hasPrevWhitened = false;
+  // Effective thresholds — initialized from the constants above and
+  // re-derived by configure(). Fields, not locals, so the per-frame loops
+  // read them without any per-frame allocation.
+  private stopAbsolute = STOP_ABSOLUTE;
+  private noteOnRatio = NOTE_ON_RATIO;
+  private noteOffRatio = NOTE_OFF_RATIO;
+  private minNoteFrames = msToFrames(NOTE_MIN_MS);
+  private maxNotesPerFrame = MAX_NOTES_PER_FRAME;
 
   public constructor(private readonly samples: Float32Array) {
     this.frameCount = samples.length === 0 ? 0 : Math.ceil(samples.length / HOP_SIZE);
@@ -161,6 +184,28 @@ export class FastSpectrumAnalyzer {
     this.timestamps = new Float32Array(this.frameCount);
     this.onsetFlux = new Float32Array(this.frameCount);
     this.fundamentalAmp = new Float32Array(this.frameCount * PITCH_COUNT);
+  }
+
+  /**
+   * Apply runtime options. sensitivity maps onto a strictness multiplier of
+   * 2 ** (1.5 - sensitivity·3): 0.5 → ×1 (current behaviour), 0 → ×~2.8
+   * stricter, 1 → ×~0.35 more permissive. The one factor scales the
+   * per-frame acceptance floor and the segmentation on/off thresholds
+   * together, so hysteresis keeps its shape. Called once before
+   * analyzeFrames() — no per-frame cost.
+   */
+  public configure(options: FastSpectrumOptions): void {
+    const sensitivity = clamp(finiteOr(options.sensitivity, 0.5), 0, 1);
+    const strictness = 2 ** (1.5 - sensitivity * 3);
+    this.stopAbsolute = STOP_ABSOLUTE * strictness;
+    this.noteOnRatio = NOTE_ON_RATIO * strictness;
+    this.noteOffRatio = NOTE_OFF_RATIO * strictness;
+    this.minNoteFrames = msToFrames(finiteOr(options.minNoteMs, NOTE_MIN_MS));
+    this.maxNotesPerFrame = clamp(
+      Math.round(finiteOr(options.maxNotesPerFrame, MAX_NOTES_PER_FRAME)),
+      1,
+      MAX_NOTES_PER_FRAME,
+    );
   }
 
   public frameCountForSeconds(seconds: number): number {
@@ -218,8 +263,8 @@ export class FastSpectrumAnalyzer {
   ): AnalyzedNote[] {
     const onsets = pickOnsets(this.onsetFlux, frameCount);
     const notes: AnalyzedNote[] = [];
-    const onThreshold = peak * NOTE_ON_RATIO;
-    const offThreshold = peak * NOTE_OFF_RATIO;
+    const onThreshold = peak * this.noteOnRatio;
+    const offThreshold = peak * this.noteOffRatio;
 
     for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
       let runStart = -1;
@@ -232,7 +277,7 @@ export class FastSpectrumAnalyzer {
         const length = endFrame - segmentStart;
         if (
           segmentStart >= 0 &&
-          length >= NOTE_MIN_FRAMES &&
+          length >= this.minNoteFrames &&
           segmentSum / length > peak * NOTE_MIN_MEAN_RATIO
         ) {
           notes.push({
@@ -361,11 +406,11 @@ export class FastSpectrumAnalyzer {
     let firstScore = 0;
     let accepted = 0;
 
-    for (let iteration = 0; iteration < MAX_NOTES_PER_FRAME; iteration += 1) {
+    for (let iteration = 0; iteration < this.maxNotesPerFrame; iteration += 1) {
       const best = this.scoreCandidates(used);
       if (
         best.pitch < 0 ||
-        best.score < Math.max(firstScore * STOP_RATIO, STOP_ABSOLUTE)
+        best.score < Math.max(firstScore * STOP_RATIO, this.stopAbsolute)
       ) {
         break;
       }
@@ -1124,6 +1169,19 @@ function maxValue(values: Float32Array): number {
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+// Milliseconds → analysis frames: one hop is HOP_SIZE / SAMPLE_RATE
+// ≈ 92.9 ms, so e.g. 150 ms lands on 2 frames. Floored at 1 — a zero-frame
+// minimum would disable the short-note filter entirely.
+function msToFrames(ms: number): number {
+  return Math.max(1, Math.ceil((ms * SAMPLE_RATE) / (HOP_SIZE * 1000)));
+}
+
+// Options arrive over postMessage — treat absent or non-finite values as
+// "use the default" rather than letting NaN silence every threshold.
+function finiteOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) ? value : fallback;
 }
 
 function normalize(

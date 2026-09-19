@@ -1,4 +1,5 @@
 import { AnalysisErrorCode, type AnalysisResult } from './analysis-types';
+import type { FastSpectrumOptions } from './fast-spectrum-analysis';
 
 export enum FastSpectrumWorkerMessageType {
   Analyze = 'analyze',
@@ -11,6 +12,7 @@ export interface FastSpectrumAnalyzeRequest {
   type: FastSpectrumWorkerMessageType.Analyze;
   jobId: number;
   samples: Float32Array;
+  options?: FastSpectrumOptions;
 }
 
 export interface FastSpectrumWorkerResponse {
@@ -47,6 +49,7 @@ export class FastSpectrumClient {
   public analyze(
     samples: Float32Array,
     callbacks: FastSpectrumCallbacks = {},
+    options?: FastSpectrumOptions,
   ): Promise<AnalysisResult> {
     if (this.disposed) {
       return Promise.reject(
@@ -67,6 +70,7 @@ export class FastSpectrumClient {
         type: FastSpectrumWorkerMessageType.Analyze,
         jobId,
         samples: workerSamples,
+        options,
       };
       worker.postMessage(request, [workerSamples.buffer]);
     });
