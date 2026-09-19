@@ -1,4 +1,4 @@
-import type { AnalysisResult } from './analysis-types';
+import type { AnalysisResult, AnalyzedNote } from './analysis-types';
 
 const FIRST_MIDI_NOTE = 21;
 const PITCH_COUNT = 88;
@@ -66,6 +66,30 @@ const REFINEMENT_B_CANDIDATES = [0.25, 1, 4];
 const PERSISTENCE_GAIN = 0.6;
 const PERSISTENCE_DECAY = 0.96;
 
+// Onset detection: broadband spectral flux catches attacks from silence, but
+// whitened decay keeps ringing partials flat — a re-strike shows no energy
+// dip. Weighted phase deviation catches what flux can't: steady partials
+// advance phase predictably, a new attack decorrelates it. Both cues feed
+// the onset function; peak-picked against a running median.
+const ONSET_MEDIAN_RATIO = 3;
+const ONSET_ABSOLUTE = 6;
+const ONSET_REFRACTORY_FRAMES = 3;
+const TAU = 2 * Math.PI;
+// Phase deviation is a 0..π fraction; scale it into the flux range so one
+// threshold governs both cues.
+const FLUX_PHASE_SCALE = 30;
+
+// Note segmentation on the enhanced pitch tracks: hysteresis enter/exit
+// thresholds relative to the file peak, plus a minimum duration. A segment
+// whose *mean* intensity stays faint is a ghost track, not a played note.
+const NOTE_ON_RATIO = 0.3;
+const NOTE_OFF_RATIO = 0.18;
+const NOTE_MIN_FRAMES = 2;
+const NOTE_MIN_MEAN_RATIO = 0.35;
+const NOTE_ONSET_DIP = 0.6;
+const NOTE_ONSET_RISE = 1.15;
+const NOTE_ONSET_LOOKBACK = 4;
+
 interface PartialLayout {
   // For every pitch and detune step: bin positions of the stretched partials.
   positions: Float32Array;
@@ -111,12 +135,22 @@ export class FastSpectrumAnalyzer {
   );
   // Per-pitch continuity state: how recently/how strongly each note sounded.
   private readonly persistence = new Float32Array(PITCH_COUNT);
+  private readonly prevWhitened = new Float32Array(BIN_COUNT);
+  private readonly previousPhase2 = new Float32Array(BIN_COUNT);
+  private readonly onsetFlux: Float32Array;
+  // Raw magnitude at each pitch's fundamental slot per frame — the whitened
+  // tracks can't see decay (ratios persist), but re-strike segmentation
+  // needs a dip signal, and real magnitude decays.
+  private readonly fundamentalAmp: Float32Array;
   private hasPreviousPhase = false;
+  private hasPrevWhitened = false;
 
   public constructor(private readonly samples: Float32Array) {
     this.frameCount = samples.length === 0 ? 0 : Math.ceil(samples.length / HOP_SIZE);
     this.energies = new Float32Array(this.frameCount * PITCH_COUNT);
     this.timestamps = new Float32Array(this.frameCount);
+    this.onsetFlux = new Float32Array(this.frameCount);
+    this.fundamentalAmp = new Float32Array(this.frameCount * PITCH_COUNT);
   }
 
   public frameCountForSeconds(seconds: number): number {
@@ -141,14 +175,113 @@ export class FastSpectrumAnalyzer {
     const source = this.energies.subarray(0, safeFrameCount * PITCH_COUNT);
     const enhanced = enhancePitchedEnergy(source, safeFrameCount);
     const frameProbabilities = new Uint8Array(enhanced.length);
-    normalize(enhanced, frameProbabilities, maxValue(enhanced));
+    const peak = maxValue(enhanced);
+    normalize(enhanced, frameProbabilities, peak);
+    // Segment on the raw energies, not the enhanced display track — the HPSS
+    // smoothing and persistence prior fill exactly the dips that separate
+    // repeated strikes of the same key.
     return {
-      notes: [],
+      notes: this.segmentNotes(
+        source,
+        this.fundamentalAmp.subarray(0, safeFrameCount * PITCH_COUNT),
+        maxValue(source),
+        safeFrameCount,
+      ),
       frameCount: safeFrameCount,
       pitchCount: PITCH_COUNT,
       frameProbabilities,
       frameTimestamps: this.timestamps.slice(0, safeFrameCount),
     };
+  }
+
+  /**
+   * Segment each pitch track into note events: hysteresis on/off thresholds,
+   * split a sustained run when a global onset fires through a dip (repeated
+   * strikes of the same key). Amplitude is the segment peak relative to the
+   * file peak — same scale the renderer colors.
+   */
+  private segmentNotes(
+    track: Float32Array,
+    amps: Float32Array,
+    peak: number,
+    frameCount: number,
+  ): AnalyzedNote[] {
+    const onsets = pickOnsets(this.onsetFlux, frameCount);
+    const notes: AnalyzedNote[] = [];
+    const onThreshold = peak * NOTE_ON_RATIO;
+    const offThreshold = peak * NOTE_OFF_RATIO;
+
+    for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
+      let runStart = -1;
+      let segmentStart = -1;
+      let segmentPeak = 0;
+      let segmentSum = 0;
+      let ampPeak = 0;
+
+      const close = (endFrame: number) => {
+        const length = endFrame - segmentStart;
+        if (
+          segmentStart >= 0 &&
+          length >= NOTE_MIN_FRAMES &&
+          segmentSum / length > peak * NOTE_MIN_MEAN_RATIO
+        ) {
+          notes.push({
+            pitchMidi: FIRST_MIDI_NOTE + pitch,
+            amplitude: Math.min(1, segmentPeak / peak),
+            startFrame: segmentStart,
+            endFrame,
+            startTimeSeconds: this.timestamps[segmentStart],
+            endTimeSeconds: this.timestamps[endFrame - 1],
+          });
+        }
+      };
+
+      for (let frame = 0; frame <= frameCount; frame += 1) {
+        const value = frame < frameCount ? track[frame * PITCH_COUNT + pitch] : 0;
+        const amp = frame < frameCount ? amps[frame * PITCH_COUNT + pitch] : 0;
+        const active = runStart >= 0 ? value > offThreshold : value > onThreshold;
+        if (active) {
+          if (runStart < 0) {
+            runStart = frame;
+            segmentStart = frame;
+            segmentPeak = value;
+            segmentSum = 0;
+            ampPeak = 0;
+          } else {
+            segmentPeak = Math.max(segmentPeak, value);
+          }
+          segmentSum += value;
+          ampPeak = Math.max(ampPeak, amp);
+          // A global onset whose preceding frames dipped deep inside a
+          // sustained run means the key was struck again. The dip is read on
+          // the raw fundamental magnitude — the whitened score track can't
+          // see decay, real amplitude can.
+          if (frame > segmentStart && onsets[frame] === 1 && ampPeak > 0) {
+            let dip = amp;
+            const first = Math.max(segmentStart, frame - NOTE_ONSET_LOOKBACK);
+            for (let back = frame - 1; back >= first; back -= 1) {
+              dip = Math.min(dip, amps[back * PITCH_COUNT + pitch]);
+            }
+            if (dip < ampPeak * NOTE_ONSET_DIP && amp > dip * NOTE_ONSET_RISE) {
+              close(frame);
+              segmentStart = frame;
+              segmentPeak = value;
+              segmentSum = value;
+              ampPeak = amp;
+            }
+          }
+        } else if (runStart >= 0) {
+          close(frame);
+          runStart = -1;
+          segmentStart = -1;
+          segmentPeak = 0;
+          segmentSum = 0;
+          ampPeak = 0;
+        }
+      }
+    }
+    notes.sort((a, b) => a.startFrame - b.startFrame || a.pitchMidi - b.pitchMidi);
+    return notes;
   }
 
   private analyzeSpectrum(frame: number): void {
@@ -165,7 +298,48 @@ export class FastSpectrumAnalyzer {
     }
 
     whitenSpectrum(magnitude, whitened, this.envelope, this.prefix, maximum);
+
+    // Broadband spectral flux + weighted phase deviation: the first catches
+    // attacks from silence, the second catches re-strikes over ringing tails
+    // (steady partials advance phase predictably; new energy decorrelates).
+    let flux = 0;
+    if (this.hasPrevWhitened) {
+      for (let bin = 0; bin < BIN_COUNT; bin += 1) {
+        flux += Math.max(0, whitened[bin] - this.prevWhitened[bin]);
+      }
+    }
+    if (frame >= 2) {
+      let phaseDeviation = 0;
+      let weightSum = 0;
+      for (let bin = 1; bin < BIN_COUNT; bin += 1) {
+        const deviation =
+          phase[bin] - 2 * previousPhase[bin] + this.previousPhase2[bin];
+        const wrapped = Math.abs(deviation - Math.round(deviation / TAU) * TAU);
+        const weight = magnitude[bin];
+        phaseDeviation += weight * wrapped;
+        weightSum += weight;
+      }
+      if (weightSum > 0) {
+        flux += (phaseDeviation / weightSum) * FLUX_PHASE_SCALE;
+      }
+    }
+    this.onsetFlux[frame] = flux;
+    this.prevWhitened.set(whitened);
+    this.hasPrevWhitened = true;
+
+    // Fundamental-slot magnitude per pitch — the decay-visible dip signal
+    // used for re-strike splitting in segmentNotes().
+    {
+      const base = frame * PITCH_COUNT;
+      const positions = PARTIAL_LAYOUT.positions;
+      for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
+        const f1 = positions[(pitch * DETUNE_STEP_COUNT + 2) * MAX_PARTIALS];
+        this.fundamentalAmp[base + pitch] = interpolate(magnitude, f1);
+      }
+    }
+
     buildSnapMap(whitened, phase, previousPhase, this.hasPreviousPhase, this.snapPosition);
+    this.previousPhase2.set(previousPhase);
     this.previousPhase.set(phase);
     this.hasPreviousPhase = true;
     residual.set(whitened);
@@ -422,6 +596,36 @@ export class FastSpectrumAnalyzer {
       }
     }
   }
+}
+
+/**
+ * Peak-pick the spectral-flux onset function: local maxima above
+ * max(median·ratio, absolute floor), with a short refractory so one attack
+ * can't fire twice. Returns a per-frame 0/1 mask.
+ */
+function pickOnsets(flux: Float32Array, frameCount: number): Uint8Array {
+  const onsets = new Uint8Array(frameCount);
+  if (frameCount === 0) {
+    return onsets;
+  }
+  const sorted = Array.from(flux.subarray(0, frameCount)).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const threshold = Math.max(median * ONSET_MEDIAN_RATIO, ONSET_ABSOLUTE);
+
+  let lastOnset = -ONSET_REFRACTORY_FRAMES - 1;
+  for (let frame = 1; frame < frameCount - 1; frame += 1) {
+    const value = flux[frame];
+    if (
+      value > threshold &&
+      value >= flux[frame - 1] &&
+      value >= flux[frame + 1] &&
+      frame - lastOnset > ONSET_REFRACTORY_FRAMES
+    ) {
+      onsets[frame] = 1;
+      lastOnset = frame;
+    }
+  }
+  return onsets;
 }
 
 function createBlackmanHarrisWindow(): Float32Array {
