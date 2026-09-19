@@ -90,6 +90,12 @@ const NOTE_ONSET_DIP = 0.6;
 const NOTE_ONSET_RISE = 1.15;
 const NOTE_ONSET_LOOKBACK = 4;
 
+// KL-NMF refit: greedy cancellation lets the first winner eat shared
+// partials whole; a joint multiplicative fit over the accepted templates
+// attributes shared energy proportionally instead.
+const NMF_ITERATIONS = 20;
+const NMF_EPSILON = 1e-6;
+
 interface PartialLayout {
   // For every pitch and detune step: bin positions of the stretched partials.
   positions: Float32Array;
@@ -142,6 +148,10 @@ export class FastSpectrumAnalyzer {
   // tracks can't see decay (ratios persist), but re-strike segmentation
   // needs a dip signal, and real magnitude decays.
   private readonly fundamentalAmp: Float32Array;
+  // NMF scratch: model spectrum V = Σ h_i·T_i plus per-note activations/norms.
+  private readonly nmfModel = new Float32Array(BIN_COUNT);
+  private readonly nmfH = new Float32Array(MAX_NOTES_PER_FRAME);
+  private readonly nmfNorm = new Float32Array(MAX_NOTES_PER_FRAME);
   private hasPreviousPhase = false;
   private hasPrevWhitened = false;
 
@@ -377,6 +387,7 @@ export class FastSpectrumAnalyzer {
     }
 
     if (accepted > 1) {
+      this.fitNmfActivations(accepted, frameOffset);
       this.verifyAccepted(accepted, frameOffset);
     }
 
@@ -392,6 +403,94 @@ export class FastSpectrumAnalyzer {
       const pitch = acceptedPitches[index];
       persistence[pitch] = Math.max(persistence[pitch], strength);
     }
+  }
+
+  /**
+   * Joint KL-NMF refit of the accepted set on the whitened spectrum. Each
+   * note's template is its refined stretched-partial footprint (same shape
+   * cancellation uses); multiplicative updates then split the energy at
+   * shared partial positions proportionally instead of letting the first
+   * winner take all of it. Energies are rewritten from h·Σw.
+   */
+  private fitNmfActivations(accepted: number, frameOffset: number): void {
+    const {
+      whitened, nmfModel, nmfH, nmfNorm,
+      acceptedPitches, acceptedPositions,
+    } = this;
+    const layout = PARTIAL_LAYOUT;
+
+    for (let index = 0; index < accepted; index += 1) {
+      const positions = acceptedPositions.subarray(
+        index * MAX_PARTIALS,
+        index * MAX_PARTIALS + MAX_PARTIALS,
+      );
+      nmfH[index] = Math.max(1, interpolate(whitened, positions[0]));
+      let norm = 0;
+      const count = layout.counts[acceptedPitches[index]];
+      for (let n = 0; n < count; n += 1) {
+        norm += layout.weights[n];
+      }
+      nmfNorm[index] = norm;
+    }
+
+    for (let iteration = 0; iteration < NMF_ITERATIONS; iteration += 1) {
+      nmfModel.fill(NMF_EPSILON);
+      for (let index = 0; index < accepted; index += 1) {
+        this.accumulateTemplate(index, nmfH[index], nmfModel, null);
+      }
+      for (let index = 0; index < accepted; index += 1) {
+        const numerator = this.accumulateTemplate(index, 1, null, nmfModel);
+        const klNorm = nmfNorm[index] * CANCEL_FOOTPRINT_BINS;
+        nmfH[index] = Math.max(
+          NMF_EPSILON,
+          nmfH[index] * (numerator / Math.max(klNorm, NMF_EPSILON)),
+        );
+      }
+    }
+
+    for (let index = 0; index < accepted; index += 1) {
+      const slot = frameOffset + acceptedPitches[index];
+      this.energies[slot] = Math.log1p(nmfH[index] * nmfNorm[index] * 4);
+    }
+  }
+
+  /**
+   * mode A (target set, evidence null): add h·T_i into the model spectrum.
+   * mode B (target null, evidence set): return Σ_k T_i[k]·W[k]/V[k].
+   */
+  private accumulateTemplate(
+    index: number,
+    scale: number,
+    target: Float32Array | null,
+    evidence: Float32Array | null,
+  ): number {
+    const layout = PARTIAL_LAYOUT;
+    const pitch = this.acceptedPitches[index];
+    const count = layout.counts[pitch];
+    const positions = this.acceptedPositions.subarray(
+      index * MAX_PARTIALS,
+      index * MAX_PARTIALS + MAX_PARTIALS,
+    );
+    const { whitened, snapPosition } = this;
+    let sum = 0;
+    for (let n = 0; n < count; n += 1) {
+      const weight = layout.weights[n];
+      const position = positions[n];
+      const bin = Math.min(BIN_COUNT - 1, Math.max(0, Math.round(position)));
+      const center = snapPosition[bin] >= 0 ? snapPosition[bin] : position;
+      const first = Math.max(0, Math.floor(center - CANCEL_FOOTPRINT_BINS));
+      const last = Math.min(BIN_COUNT - 1, Math.ceil(center + CANCEL_FOOTPRINT_BINS));
+      for (let k = first; k <= last; k += 1) {
+        const shape =
+          weight * Math.max(0, 1 - Math.abs(k - center) / CANCEL_FOOTPRINT_BINS);
+        if (target !== null) {
+          target[k] += scale * shape;
+        } else if (evidence !== null) {
+          sum += shape * (whitened[k] / Math.max(evidence[k], NMF_EPSILON));
+        }
+      }
+    }
+    return sum;
   }
 
   /**
