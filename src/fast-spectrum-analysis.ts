@@ -5,14 +5,63 @@ const PITCH_COUNT = 88;
 const SAMPLE_RATE = 22050;
 const FFT_SIZE = 8192;
 const HOP_SIZE = 2048;
+const BIN_COUNT = FFT_SIZE / 2 + 1;
 const NORMALIZATION_FLOOR = 0.07;
 const NORMALIZATION_GAMMA = 1.4;
 const HARMONIC_TIME_RADIUS = 2;
 const PERCUSSIVE_PITCH_RADIUS = 4;
-const HARMONIC_SUPPORT_WEIGHT = 0.35;
 const MASK_EXPONENT = 1.35;
 const FRAME_FLOOR_PERCENTILE = 0.42;
 const MASK_EPSILON = 1e-6;
+
+// Whitened spectrum: broadband noise sits near 1, true partials stand out as ratios.
+const WHITEN_FLOOR_RATIO = 1e-4;
+const PEAK_MIN_RATIO = 1.5;
+const NOISE_FLOOR = 1;
+
+// Candidates are scored on a ±50-cent grid so detuned pianos and the Railsback
+// stretch still line up their partials.
+const DETUNE_STEPS_CENTS = [-50, -25, 0, 25, 50];
+const DETUNE_STEP_COUNT = DETUNE_STEPS_CENTS.length;
+
+// Fletcher/Young piano inharmonicity: partial n sits at n·f0·sqrt(1 + B·n²).
+// B rises toward the treble (~doubles every 8 semitones above middle C).
+const INHARMONICITY_BASE = 3.5e-4;
+const INHARMONICITY_REF_MIDI = 60;
+const INHARMONICITY_OCTAVE_RATE = 8;
+// Wound bass strings still carry some stretch the treble model under-estimates.
+const INHARMONICITY_FLOOR = 2e-4;
+const MAX_PARTIALS = 14;
+const MAX_PARTIAL_FREQUENCY = 10500;
+const PARTIAL_WEIGHT_EXPONENT = 0.9;
+const PARTIAL_SNAP_RADIUS_BINS = 1.5;
+const PARTIAL_FALLBACK_WEIGHT = 0.4;
+const MIN_PARTIAL_COUNT = 3;
+// Missing partials actively cost salience (down to this cap) — that's what
+// stops candidates that only coincide with other notes' harmonics.
+const MISSING_PARTIAL_CAP = 0.5;
+// One partial can only contribute this much: a real note wins on many medium
+// partials, a ghost can't ride on two or three giant coincidences.
+const PARTIAL_SATURATION = 2;
+
+// Iterative estimate-and-cancel (Klapuri): pick the strongest note, remove its
+// partials from the residual, repeat. Kills octave/fifth ghosts.
+const MAX_NOTES_PER_FRAME = 8;
+const CANCEL_FOOTPRINT_BINS = 2.5;
+const STOP_RATIO = 0.15;
+const STOP_ABSOLUTE = 1.0;
+const SHORTLIST_COUNT = 16;
+const SHORTLIST_RATIO = 0.2;
+
+interface PartialLayout {
+  // For every pitch and detune step: bin positions of the stretched partials.
+  positions: Float32Array;
+  // Per pitch: how many partials fit below MAX_PARTIAL_FREQUENCY.
+  counts: Uint8Array;
+  weights: Float32Array;
+}
+
+const PARTIAL_LAYOUT = createPartialLayout();
 
 export class FastSpectrumAnalyzer {
   public readonly frameCount: number;
@@ -20,8 +69,20 @@ export class FastSpectrumAnalyzer {
   private readonly timestamps: Float32Array;
   private readonly real = new Float32Array(FFT_SIZE);
   private readonly imaginary = new Float32Array(FFT_SIZE);
-  private readonly window = createHannWindow();
-  private readonly pitchBands = createPitchBands();
+  private readonly window = createBlackmanHarrisWindow();
+  private readonly magnitude = new Float32Array(BIN_COUNT);
+  private readonly whitened = new Float32Array(BIN_COUNT);
+  private readonly residual = new Float32Array(BIN_COUNT);
+  private readonly envelope = new Float32Array(BIN_COUNT);
+  private readonly prefix = new Float32Array(BIN_COUNT + 1);
+  private readonly snapPosition = new Float32Array(BIN_COUNT);
+  private readonly phase = new Float32Array(BIN_COUNT);
+  private readonly previousPhase = new Float32Array(BIN_COUNT);
+  private readonly candidateScores = new Float32Array(PITCH_COUNT);
+  private readonly candidateSteps = new Int8Array(PITCH_COUNT);
+  private readonly shortlist = new Int32Array(PITCH_COUNT);
+  private readonly used = new Uint8Array(PITCH_COUNT);
+  private hasPreviousPhase = false;
 
   public constructor(private readonly samples: Float32Array) {
     this.frameCount = samples.length === 0 ? 0 : Math.ceil(samples.length / HOP_SIZE);
@@ -36,18 +97,13 @@ export class FastSpectrumAnalyzer {
   public analyzeFrames(firstFrame: number, endFrame: number): void {
     for (let frame = firstFrame; frame < endFrame; frame += 1) {
       const start = frame * HOP_SIZE;
-      this.real.fill(0);
-      this.imaginary.fill(0);
       for (let sample = 0; sample < FFT_SIZE; sample += 1) {
         this.real[sample] = (this.samples[start + sample] ?? 0) * this.window[sample];
+        this.imaginary[sample] = 0;
       }
       fft(this.real, this.imaginary);
       this.timestamps[frame] = start / SAMPLE_RATE;
-
-      for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
-        const energy = samplePitchEnergy(this.real, this.imaginary, this.pitchBands[pitch]);
-        this.energies[frame * PITCH_COUNT + pitch] = Math.log1p(energy);
-      }
+      this.analyzeSpectrum(frame);
     }
   }
 
@@ -65,71 +121,301 @@ export class FastSpectrumAnalyzer {
       frameTimestamps: this.timestamps.slice(0, safeFrameCount),
     };
   }
+
+  private analyzeSpectrum(frame: number): void {
+    const { magnitude, whitened, residual, phase, previousPhase } = this;
+    let maximum = 0;
+    for (let bin = 0; bin < BIN_COUNT; bin += 1) {
+      const re = this.real[bin];
+      const im = this.imaginary[bin];
+      magnitude[bin] = Math.sqrt(re * re + im * im);
+      phase[bin] = Math.atan2(im, re);
+      if (magnitude[bin] > maximum) {
+        maximum = magnitude[bin];
+      }
+    }
+
+    whitenSpectrum(magnitude, whitened, this.envelope, this.prefix, maximum);
+    buildSnapMap(whitened, phase, previousPhase, this.hasPreviousPhase, this.snapPosition);
+    this.previousPhase.set(phase);
+    this.hasPreviousPhase = true;
+    residual.set(whitened);
+
+    const frameOffset = frame * PITCH_COUNT;
+    this.energies.fill(0, frameOffset, frameOffset + PITCH_COUNT);
+    const used = this.used.fill(0);
+    let firstScore = 0;
+
+    for (let iteration = 0; iteration < MAX_NOTES_PER_FRAME; iteration += 1) {
+      const best = this.scoreCandidates(used);
+      if (
+        best.pitch < 0 ||
+        best.score < Math.max(firstScore * STOP_RATIO, STOP_ABSOLUTE)
+      ) {
+        break;
+      }
+      if (iteration === 0) {
+        firstScore = best.score;
+      }
+      used[best.pitch] = 1;
+      this.energies[frameOffset + best.pitch] = Math.max(
+        this.energies[frameOffset + best.pitch],
+        Math.log1p(best.score * 4),
+      );
+      this.cancelNote(best.pitch, best.step);
+    }
+  }
+
+  private scoreCandidates(used: Uint8Array): {
+    pitch: number;
+    step: number;
+    score: number;
+  } {
+    const { candidateScores, candidateSteps, shortlist } = this;
+    const layout = PARTIAL_LAYOUT;
+
+    // Pass 1: coarse score at center detune for all pitches.
+    let bestCoarse = 0;
+    for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
+      const score = used[pitch] !== 0
+        ? 0
+        : this.salience(pitch, 2, layout);
+      candidateScores[pitch] = score;
+      candidateSteps[pitch] = 2;
+      if (score > bestCoarse) {
+        bestCoarse = score;
+      }
+    }
+    if (bestCoarse <= 0) {
+      return { pitch: -1, step: 0, score: 0 };
+    }
+
+    // Pass 2: full detune grid only for the strongest candidates.
+    let shortlistCount = 0;
+    const threshold = bestCoarse * SHORTLIST_RATIO;
+    for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
+      if (candidateScores[pitch] >= threshold && shortlistCount < SHORTLIST_COUNT) {
+        shortlist[shortlistCount] = pitch;
+        shortlistCount += 1;
+      }
+    }
+
+    let bestPitch = -1;
+    let bestStep = 0;
+    let bestScore = 0;
+    for (let index = 0; index < shortlistCount; index += 1) {
+      const pitch = shortlist[index];
+      for (let step = 0; step < DETUNE_STEP_COUNT; step += 1) {
+        if (step === 2) {
+          continue;
+        }
+        const score = this.salience(pitch, step, layout);
+        if (score > candidateScores[pitch]) {
+          candidateScores[pitch] = score;
+          candidateSteps[pitch] = step;
+        }
+      }
+      if (candidateScores[pitch] > bestScore) {
+        bestScore = candidateScores[pitch];
+        bestPitch = pitch;
+        bestStep = candidateSteps[pitch];
+      }
+    }
+    return { pitch: bestPitch, step: bestStep, score: bestScore };
+  }
+
+  private salience(pitch: number, step: number, layout: PartialLayout): number {
+    const count = layout.counts[pitch];
+    if (count === 0) {
+      return 0;
+    }
+    const base = (pitch * DETUNE_STEP_COUNT + step) * MAX_PARTIALS;
+    const { residual, snapPosition } = this;
+    let sum = 0;
+    for (let n = 0; n < count; n += 1) {
+      const weight = layout.weights[n];
+      const position = layout.positions[base + n];
+      const bin = Math.min(BIN_COUNT - 1, Math.max(0, Math.round(position)));
+      const snap = snapPosition[bin];
+      const amplitude = snap >= 0
+        ? interpolate(residual, snap)
+        : interpolate(residual, position) * PARTIAL_FALLBACK_WEIGHT;
+      const excess = amplitude - NOISE_FLOOR;
+      // A missing fundamental costs its whole weight — a note whose f1 slot is
+      // empty is usually a harmonic of something else, not a played key.
+      const penalty = n === 0 ? 1 : MISSING_PARTIAL_CAP;
+      sum += weight * Math.max(Math.min(excess, PARTIAL_SATURATION), -penalty);
+    }
+    return sum;
+  }
+
+  private cancelNote(pitch: number, step: number): void {
+    const layout = PARTIAL_LAYOUT;
+    const count = layout.counts[pitch];
+    const base = (pitch * DETUNE_STEP_COUNT + step) * MAX_PARTIALS;
+    const { residual, snapPosition } = this;
+
+    for (let n = 0; n < count; n += 1) {
+      const position = layout.positions[base + n];
+      const bin = Math.min(BIN_COUNT - 1, Math.max(0, Math.round(position)));
+      const center = snapPosition[bin] >= 0 ? snapPosition[bin] : position;
+      const amplitude = interpolate(residual, center);
+      const first = Math.max(0, Math.floor(center - CANCEL_FOOTPRINT_BINS));
+      const last = Math.min(BIN_COUNT - 1, Math.ceil(center + CANCEL_FOOTPRINT_BINS));
+      for (let k = first; k <= last; k += 1) {
+        const shape = 1 - Math.abs(k - center) / CANCEL_FOOTPRINT_BINS;
+        residual[k] = Math.max(NOISE_FLOOR, residual[k] - amplitude * shape);
+      }
+    }
+  }
 }
 
-interface PitchBand {
-  centerBin: number;
-  firstBin: number;
-  lastBin: number;
-}
-
-function createHannWindow(): Float32Array {
+function createBlackmanHarrisWindow(): Float32Array {
+  // 4-term Blackman-Harris: −92 dB sidelobes, ~4-bin main lobe.
   const window = new Float32Array(FFT_SIZE);
+  const a0 = 0.35875;
+  const a1 = 0.48829;
+  const a2 = 0.14128;
+  const a3 = 0.01168;
   for (let index = 0; index < FFT_SIZE; index += 1) {
-    window[index] = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / (FFT_SIZE - 1));
+    const phase = (2 * Math.PI * index) / (FFT_SIZE - 1);
+    window[index] =
+      a0 - a1 * Math.cos(phase) + a2 * Math.cos(2 * phase) - a3 * Math.cos(3 * phase);
   }
   return window;
 }
 
-function createPitchBands(): PitchBand[] {
-  return Array.from({ length: PITCH_COUNT }, (_, pitchIndex) => {
-    const midi = FIRST_MIDI_NOTE + pitchIndex;
-    const frequency = 440 * 2 ** ((midi - 69) / 12);
-    const lowerFrequency = frequency * 2 ** (-1 / 24);
-    const upperFrequency = frequency * 2 ** (1 / 24);
-    return {
-      centerBin: (frequency * FFT_SIZE) / SAMPLE_RATE,
-      firstBin: Math.max(1, Math.ceil((lowerFrequency * FFT_SIZE) / SAMPLE_RATE)),
-      lastBin: Math.min(
-        FFT_SIZE / 2 - 1,
-        Math.floor((upperFrequency * FFT_SIZE) / SAMPLE_RATE),
-      ),
-    };
-  });
-}
-
-function samplePitchEnergy(
-  real: Float32Array,
-  imaginary: Float32Array,
-  band: PitchBand,
-): number {
-  if (band.firstBin > band.lastBin) {
-    return interpolateBinEnergy(real, imaginary, band.centerBin);
-  }
-
-  let energy = 0;
-  for (let bin = band.firstBin; bin <= band.lastBin; bin += 1) {
-    energy += binEnergy(real, imaginary, bin);
-  }
-  return energy / (band.lastBin - band.firstBin + 1);
-}
-
-function interpolateBinEnergy(
-  real: Float32Array,
-  imaginary: Float32Array,
-  position: number,
-): number {
-  const lower = Math.max(1, Math.min(FFT_SIZE / 2 - 1, Math.floor(position)));
-  const upper = Math.min(FFT_SIZE / 2 - 1, lower + 1);
-  const fraction = position - Math.floor(position);
-  return (
-    binEnergy(real, imaginary, lower) * (1 - fraction) +
-    binEnergy(real, imaginary, upper) * fraction
+function createPartialLayout(): PartialLayout {
+  const positions = new Float32Array(
+    PITCH_COUNT * DETUNE_STEP_COUNT * MAX_PARTIALS,
   );
+  const counts = new Uint8Array(PITCH_COUNT);
+  const weights = new Float32Array(MAX_PARTIALS);
+  for (let n = 0; n < MAX_PARTIALS; n += 1) {
+    weights[n] = (n + 1) ** -PARTIAL_WEIGHT_EXPONENT;
+  }
+
+  for (let pitch = 0; pitch < PITCH_COUNT; pitch += 1) {
+    const midi = FIRST_MIDI_NOTE + pitch;
+    const fundamental = 440 * 2 ** ((midi - 69) / 12);
+    const inharmonicity = Math.max(
+      INHARMONICITY_BASE *
+        2 ** ((midi - INHARMONICITY_REF_MIDI) / INHARMONICITY_OCTAVE_RATE),
+      INHARMONICITY_FLOOR,
+    );
+
+    let count = 0;
+    for (let step = 0; step < DETUNE_STEP_COUNT; step += 1) {
+      const detuned = fundamental * 2 ** (DETUNE_STEPS_CENTS[step] / 1200);
+      const base = (pitch * DETUNE_STEP_COUNT + step) * MAX_PARTIALS;
+      for (let n = 0; n < MAX_PARTIALS; n += 1) {
+        const harmonic = n + 1;
+        const frequency =
+          detuned * harmonic * Math.sqrt(1 + inharmonicity * harmonic * harmonic);
+        positions[base + n] = (frequency * FFT_SIZE) / SAMPLE_RATE;
+        if (step === 2 && frequency <= MAX_PARTIAL_FREQUENCY) {
+          count = harmonic;
+        }
+      }
+    }
+    counts[pitch] = count >= MIN_PARTIAL_COUNT ? count : 0;
+  }
+  return { positions, counts, weights };
 }
 
-function binEnergy(real: Float32Array, imaginary: Float32Array, bin: number): number {
-  return real[bin] * real[bin] + imaginary[bin] * imaginary[bin];
+/**
+ * Whitening: divide the magnitude spectrum by a local moving-average envelope
+ * (~quarter-octave wide). Broadband noise maps to ≈1, resolved partials
+ * to ratios above it — this normalizes bright vs. dull instruments so the
+ * harmonic vote isn't dominated by spectral envelope shape.
+ */
+function whitenSpectrum(
+  magnitude: Float32Array,
+  whitened: Float32Array,
+  envelope: Float32Array,
+  prefix: Float32Array,
+  maximum: number,
+): void {
+  const floor = Math.max(maximum * WHITEN_FLOOR_RATIO, 1e-12);
+  prefix[0] = 0;
+  for (let bin = 0; bin < BIN_COUNT; bin += 1) {
+    prefix[bin + 1] = prefix[bin] + magnitude[bin];
+  }
+  for (let bin = 0; bin < BIN_COUNT; bin += 1) {
+    const halfWidth = Math.max(8, bin >> 2);
+    const left = Math.max(0, bin - halfWidth);
+    const right = Math.min(BIN_COUNT - 1, bin + halfWidth);
+    envelope[bin] = Math.max(
+      (prefix[right + 1] - prefix[left]) / (right - left + 1),
+      floor,
+    );
+    whitened[bin] = magnitude[bin] / envelope[bin];
+  }
+}
+
+/**
+ * Peak detection + sub-bin refinement. Each local maximum gets a refined
+ * position: the phase-vocoder instantaneous frequency (phase advance between
+ * consecutive frames at the same bin) is preferred since it stays unbiased
+ * when a neighbour pulls the peak asymmetric; parabolic interpolation on the
+ * magnitude is the fallback and the sanity bound.
+ */
+function buildSnapMap(
+  whitened: Float32Array,
+  phase: Float32Array,
+  previousPhase: Float32Array,
+  hasPreviousPhase: boolean,
+  snapPosition: Float32Array,
+): void {
+  snapPosition.fill(-1);
+  const binsPerRadian = FFT_SIZE / (2 * Math.PI * HOP_SIZE);
+
+  for (let bin = 2; bin < BIN_COUNT - 2; bin += 1) {
+    const center = whitened[bin];
+    if (
+      center < PEAK_MIN_RATIO ||
+      center <= whitened[bin - 1] ||
+      center <= whitened[bin + 1] ||
+      center <= whitened[bin - 2] ||
+      center <= whitened[bin + 2]
+    ) {
+      continue;
+    }
+
+    const denominator = whitened[bin - 1] - 2 * center + whitened[bin + 1];
+    let refined = bin;
+    if (denominator !== 0) {
+      const delta = 0.5 * (whitened[bin - 1] - whitened[bin + 1]) / denominator;
+      refined = bin + Math.max(-0.5, Math.min(0.5, delta));
+    }
+
+    if (hasPreviousPhase) {
+      const expected = (2 * Math.PI * bin * HOP_SIZE) / FFT_SIZE;
+      let advance = phase[bin] - previousPhase[bin] - expected;
+      advance -= Math.round(advance / (2 * Math.PI)) * 2 * Math.PI;
+      const instantaneous = bin + advance * binsPerRadian;
+      if (Math.abs(instantaneous - bin) <= 1.5) {
+        refined = instantaneous;
+      }
+    }
+
+    const first = Math.max(0, Math.floor(refined - PARTIAL_SNAP_RADIUS_BINS));
+    const last = Math.min(BIN_COUNT - 1, Math.ceil(refined + PARTIAL_SNAP_RADIUS_BINS));
+    for (let k = first; k <= last; k += 1) {
+      const existing = snapPosition[k];
+      if (existing < 0 || Math.abs(refined - k) < Math.abs(existing - k)) {
+        snapPosition[k] = refined;
+      }
+    }
+  }
+}
+
+function interpolate(values: Float32Array, position: number): number {
+  const clamped = Math.min(BIN_COUNT - 1, Math.max(0, position));
+  const lower = Math.floor(clamped);
+  const upper = Math.min(BIN_COUNT - 1, lower + 1);
+  const fraction = clamped - lower;
+  return values[lower] * (1 - fraction) + values[upper] * fraction;
 }
 
 function fft(real: Float32Array, imaginary: Float32Array): void {
@@ -176,7 +462,6 @@ function fft(real: Float32Array, imaginary: Float32Array): void {
  * Soft HPSS on the pitchogram:
  * sustained pitched energy (bass, melody) survives the harmonic median;
  * broadband drum hits dominate the percussive median and get masked down.
- * Octave/fifth support further protects bass guitar fundamentals.
  */
 function enhancePitchedEnergy(
   energies: Float32Array,
@@ -222,9 +507,7 @@ function enhancePitchedEnergy(
       const mask =
         harmonic[index] /
         (harmonic[index] + percussive[index] + MASK_EPSILON);
-      const salience =
-        energy + HARMONIC_SUPPORT_WEIGHT * harmonicSupport(energies, frameOffset, pitch);
-      enhanced[index] = salience * mask ** MASK_EXPONENT;
+      enhanced[index] = energy * mask ** MASK_EXPONENT;
     }
 
     const floor = framePercentile(
@@ -240,24 +523,6 @@ function enhancePitchedEnergy(
   }
 
   return enhanced;
-}
-
-function harmonicSupport(
-  energies: Float32Array,
-  frameOffset: number,
-  pitch: number,
-): number {
-  let support = 0;
-  if (pitch + 12 < PITCH_COUNT) {
-    support += energies[frameOffset + pitch + 12];
-  }
-  if (pitch + 19 < PITCH_COUNT) {
-    support += energies[frameOffset + pitch + 19] * 0.6;
-  }
-  if (pitch + 24 < PITCH_COUNT) {
-    support += energies[frameOffset + pitch + 24] * 0.4;
-  }
-  return support;
 }
 
 function medianAlongTime(
@@ -346,10 +611,11 @@ function normalize(
   }
   for (let index = 0; index < values.length; index += 1) {
     const normalized = energies[index] / maximum;
-    const contrasted = Math.max(
-      0,
-      (normalized - NORMALIZATION_FLOOR) / (1 - NORMALIZATION_FLOOR),
-    ) ** NORMALIZATION_GAMMA;
+    const contrasted =
+      Math.max(
+        0,
+        (normalized - NORMALIZATION_FLOOR) / (1 - NORMALIZATION_FLOOR),
+      ) ** NORMALIZATION_GAMMA;
     values[index] = Math.round(contrasted * 255);
   }
 }
