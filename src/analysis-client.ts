@@ -15,8 +15,11 @@ interface ActiveJob {
 }
 
 export class AnalysisClientError extends Error {
-  public constructor(public readonly code: AnalysisErrorCode) {
-    super(code);
+  public constructor(
+    public readonly code: AnalysisErrorCode,
+    detail?: string,
+  ) {
+    super(detail === undefined ? code : `${code}: ${detail}`);
     this.name = 'AnalysisClientError';
   }
 }
@@ -26,6 +29,13 @@ export class AnalysisClient {
   private activeJob: ActiveJob | null = null;
   private nextJobId = 1;
   private disposed = false;
+
+  public constructor(
+    private readonly createWorkerInstance: () => Worker = () =>
+      new Worker(new URL('./analysis-worker.ts', import.meta.url), {
+        type: 'module',
+      }),
+  ) {}
 
   public analyze(
     samples: Float32Array,
@@ -78,10 +88,7 @@ export class AnalysisClient {
   }
 
   private createWorker(): Worker {
-    const worker = new Worker(
-      new URL('./analysis-worker.ts', import.meta.url),
-      { type: 'module' },
-    );
+    const worker = this.createWorkerInstance();
     worker.addEventListener('message', event => this.handleWorkerMessage(worker, event));
     worker.addEventListener('error', () => this.handleWorkerFailure(worker));
     worker.addEventListener('messageerror', () => this.handleWorkerFailure(worker));
@@ -103,7 +110,7 @@ export class AnalysisClient {
     }
 
     if (message.type === WorkerMessageType.Progress) {
-      job.callbacks.onProgress?.(message.progress);
+      job.callbacks.onProgress?.(message.progress, message.notes, message.stage);
       return;
     }
 
@@ -114,7 +121,7 @@ export class AnalysisClient {
       return;
     }
 
-    job.reject(new AnalysisClientError(message.code));
+    job.reject(new AnalysisClientError(message.code, message.detail));
   };
 
   private readonly handleWorkerFailure = (worker: Worker): void => {

@@ -1225,7 +1225,7 @@ function updateRecognitionModeUi(): void {
   const preciseModelReadyText = 'Точный анализ уже использовался на этом устройстве — повторная загрузка обычно не нужна.';
   elements.recognitionModeHint.textContent = preciseModelReadyOnDevice
     ? ''
-    : 'Первый точный анализ скачает модель MuScriptor — около 400 МБ, дальше она берётся из кэша.';
+    : 'Первый точный анализ скачает модель MuScriptor — около 110 МБ, дальше она берётся из кэша.';
   elements.preciseModeButton.title = preciseModelReadyOnDevice
     ? `Точнее. ${preciseModelReadyText}`
     : 'Точнее';

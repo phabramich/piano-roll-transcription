@@ -43,6 +43,7 @@ export interface AnalyzedNote {
   endFrame: number;
   startTimeSeconds: number;
   endTimeSeconds: number;
+  instrument?: string;
 }
 
 export interface AnalysisResult {
@@ -51,6 +52,7 @@ export interface AnalysisResult {
   pitchCount: number;
   frameProbabilities: Uint8Array;
   frameTimestamps: Float32Array;
+  midiBytes?: Uint8Array;
 }
 
 export interface AnalyzeWorkerRequest {
@@ -63,6 +65,8 @@ export interface AnalysisProgressWorkerMessage {
   type: WorkerMessageType.Progress;
   jobId: number;
   progress: number;
+  stage?: 'model' | 'prepare' | 'transcribe';
+  notes?: AnalyzedNote[];
 }
 
 export interface AnalysisResultWorkerMessage {
@@ -75,6 +79,7 @@ export interface AnalysisErrorWorkerMessage {
   type: WorkerMessageType.Error;
   jobId: number;
   code: AnalysisErrorCode;
+  detail?: string;
 }
 
 export type AnalysisWorkerRequest = AnalyzeWorkerRequest;
@@ -85,5 +90,9 @@ export type AnalysisWorkerResponse =
   | AnalysisErrorWorkerMessage;
 
 export interface AnalysisCallbacks {
-  onProgress?: (progress: number) => void;
+  onProgress?: (
+    progress: number,
+    incrementalNotes?: AnalyzedNote[],
+    stage?: 'model' | 'prepare' | 'transcribe',
+  ) => void;
 }

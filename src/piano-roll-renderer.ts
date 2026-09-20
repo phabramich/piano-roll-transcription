@@ -1,5 +1,5 @@
 import type { AnalyzedNote, AnalysisResult } from './analysis-types';
-import { DESIGN_COLORS } from './design-colors';
+import { DESIGN_COLORS, instrumentColor } from './design-colors';
 
 const FIRST_MIDI_NOTE = 21;
 const LAST_MIDI_NOTE = 108;
@@ -425,6 +425,18 @@ export class PianoRollRenderer {
         }
         const yTop = this.timeToY(note.endTimeSeconds, rollHeight);
         const yBottom = this.timeToY(note.startTimeSeconds, rollHeight);
+        if (note.instrument !== undefined) {
+          this.context.fillStyle = instrumentColor(note.instrument);
+          this.context.strokeStyle = this.context.fillStyle;
+          this.context.fillRect(
+            this.pitchToX(note.pitchMidi, width),
+            yTop,
+            Math.max(1, columnWidth),
+            Math.max(1, yBottom - yTop),
+          );
+        } else {
+          this.context.strokeStyle = DESIGN_COLORS.note;
+        }
         this.context.strokeRect(
           this.pitchToX(note.pitchMidi, width) + 0.5,
           yTop,

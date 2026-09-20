@@ -1,6 +1,8 @@
 const TARGET_SAMPLE_RATE = 22050;
 const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 600;
+const MIN_PLAYBACK_RATE = 0.2;
+const MAX_PLAYBACK_RATE = 1;
 
 export enum AudioPlayerErrorCode {
   Cancelled = 'cancelled',
@@ -21,18 +23,33 @@ export interface DecodedAudio {
   durationSeconds: number;
 }
 
+type PitchPreservingMediaElement = HTMLAudioElement & {
+  mozPreservesPitch?: boolean;
+  webkitPreservesPitch?: boolean;
+};
+
 export class AudioPlayer {
   private readonly context = new AudioContext();
+  private readonly element: PitchPreservingMediaElement = new Audio();
+  private objectUrl: string | null = null;
   private buffer: AudioBuffer | null = null;
-  private source: AudioBufferSourceNode | null = null;
-  private offsetSeconds = 0;
-  private startedAtContextTime = 0;
   private playing = false;
   private loadToken = 0;
   private playToken = 0;
   private disposed = false;
 
   public onStateChange: (() => void) | null = null;
+
+  public constructor() {
+    this.element.preservesPitch = true;
+    this.element.mozPreservesPitch = true;
+    this.element.webkitPreservesPitch = true;
+    this.element.addEventListener('ended', () => {
+      this.playToken += 1;
+      this.playing = false;
+      this.notifyStateChange();
+    });
+  }
 
   public get durationSeconds(): number {
     return this.buffer?.duration ?? 0;
@@ -43,14 +60,7 @@ export class AudioPlayer {
   }
 
   public get currentTimeSeconds(): number {
-    if (!this.playing) {
-      return this.offsetSeconds;
-    }
-
-    return Math.min(
-      this.durationSeconds,
-      this.offsetSeconds + this.context.currentTime - this.startedAtContextTime,
-    );
+    return Math.min(this.durationSeconds, this.element.currentTime);
   }
 
   public async load(file: File): Promise<DecodedAudio> {
@@ -60,7 +70,7 @@ export class AudioPlayer {
       throw new AudioPlayerError(AudioPlayerErrorCode.FileTooLarge);
     }
 
-    this.stopSource();
+    this.stopPlayback();
 
     let decodedBuffer: AudioBuffer;
     try {
@@ -76,8 +86,14 @@ export class AudioPlayer {
 
     const samples = await this.downmixAndResample(decodedBuffer);
     this.ensureCurrentLoad(loadToken);
+
+    const objectUrl = URL.createObjectURL(file);
+    this.element.src = objectUrl;
+    if (this.objectUrl !== null) {
+      URL.revokeObjectURL(this.objectUrl);
+    }
+    this.objectUrl = objectUrl;
     this.buffer = decodedBuffer;
-    this.offsetSeconds = 0;
     this.notifyStateChange();
 
     return { samples, durationSeconds: decodedBuffer.duration };
@@ -89,20 +105,27 @@ export class AudioPlayer {
     }
 
     const playToken = ++this.playToken;
-    await this.context.resume();
-    if (
-      playToken !== this.playToken ||
-      this.buffer === null ||
-      this.playing
-    ) {
+    if (this.element.currentTime >= this.durationSeconds) {
+      this.element.currentTime = 0;
+    }
+
+    try {
+      await this.element.play();
+    } catch {
       return;
     }
 
-    if (this.offsetSeconds >= this.durationSeconds) {
-      this.offsetSeconds = 0;
+    if (
+      playToken !== this.playToken ||
+      this.disposed ||
+      this.buffer === null
+    ) {
+      this.element.pause();
+      return;
     }
 
-    this.startSource();
+    this.playing = true;
+    this.notifyStateChange();
   }
 
   public pause(): void {
@@ -111,29 +134,44 @@ export class AudioPlayer {
       return;
     }
 
-    this.offsetSeconds = this.currentTimeSeconds;
-    this.stopSource();
+    this.playing = false;
+    this.element.pause();
     this.notifyStateChange();
   }
 
   public seek(seconds: number): void {
     this.playToken += 1;
-    this.offsetSeconds = Math.min(this.durationSeconds, Math.max(0, seconds));
-    if (this.playing) {
-      this.stopSource();
-      this.startSource();
+    this.element.currentTime = Math.min(
+      this.durationSeconds,
+      Math.max(0, seconds),
+    );
+    this.notifyStateChange();
+  }
+
+  public setPlaybackRate(rate: number): void {
+    if (this.disposed || !Number.isFinite(rate)) {
       return;
     }
 
-    this.notifyStateChange();
+    const nextRate = Math.min(
+      MAX_PLAYBACK_RATE,
+      Math.max(MIN_PLAYBACK_RATE, rate),
+    );
+    this.element.defaultPlaybackRate = nextRate;
+    this.element.playbackRate = nextRate;
   }
 
   public reset(): void {
     this.loadToken += 1;
     this.playToken += 1;
-    this.stopSource();
+    this.stopPlayback();
     this.buffer = null;
-    this.offsetSeconds = 0;
+    this.element.removeAttribute('src');
+    this.element.load();
+    if (this.objectUrl !== null) {
+      URL.revokeObjectURL(this.objectUrl);
+      this.objectUrl = null;
+    }
     this.notifyStateChange();
   }
 
@@ -144,8 +182,14 @@ export class AudioPlayer {
     this.disposed = true;
     this.loadToken += 1;
     this.playToken += 1;
-    this.stopSource();
+    this.reset();
     void this.context.close().catch(() => undefined);
+  }
+
+  private stopPlayback(): void {
+    this.playing = false;
+    this.element.pause();
+    this.element.currentTime = 0;
   }
 
   private async downmixAndResample(buffer: AudioBuffer): Promise<Float32Array> {
@@ -163,52 +207,6 @@ export class AudioPlayer {
     if (loadToken !== this.loadToken) {
       throw new AudioPlayerError(AudioPlayerErrorCode.Cancelled);
     }
-  }
-
-  private startSource(): void {
-    if (this.buffer === null || this.offsetSeconds >= this.buffer.duration) {
-      return;
-    }
-
-    const source = this.context.createBufferSource();
-    source.buffer = this.buffer;
-    source.connect(this.context.destination);
-    source.onended = () => this.handleEnded(source);
-    try {
-      source.start(0, this.offsetSeconds);
-    } catch (error) {
-      source.onended = null;
-      source.disconnect();
-      throw error;
-    }
-    this.source = source;
-    this.startedAtContextTime = this.context.currentTime;
-    this.playing = true;
-    this.notifyStateChange();
-  }
-
-  private stopSource(): void {
-    const source = this.source;
-    this.source = null;
-    this.playing = false;
-
-    if (source !== null) {
-      source.onended = null;
-      source.stop();
-      source.disconnect();
-    }
-  }
-
-  private handleEnded(source: AudioBufferSourceNode): void {
-    if (source !== this.source) {
-      return;
-    }
-
-    source.disconnect();
-    this.source = null;
-    this.playing = false;
-    this.offsetSeconds = this.durationSeconds;
-    this.notifyStateChange();
   }
 
   private notifyStateChange(): void {
