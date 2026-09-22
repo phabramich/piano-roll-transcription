@@ -15,7 +15,7 @@ import {
  * note-on/note-off events, which are reported as incremental progress so the
  * piano roll fills in while the model works.
  *
- * Requires cross-origin isolation (SharedArrayBuffer for pthreads) and ~2.5 GB
+ * Requires cross-origin isolation (SharedArrayBuffer for pthreads) and ~3 GB
  * of wasm memory for the GGUF plus decoder arenas.
  */
 
@@ -63,6 +63,7 @@ interface MuscriptorModule {
     midi?: Uint8Array;
     error?: string;
   };
+  streamAbort?(): void;
   lastError(): string;
   unload(): void;
 }
@@ -83,6 +84,7 @@ class MuscriptorWorkerError extends Error {
 }
 
 let modulePromise: Promise<MuscriptorModule> | null = null;
+let modelReady = false;
 
 function postMessageToClient(
   message: AnalysisWorkerResponse,
@@ -163,10 +165,17 @@ async function fetchModelBytes(jobId: number): Promise<Uint8Array> {
   return bytes;
 }
 
-async function initializeModule(jobId: number): Promise<MuscriptorModule> {
+async function createModuleInstance(): Promise<MuscriptorModule> {
+  const deviceMemory = (navigator as { deviceMemory?: number }).deviceMemory;
   if (
     typeof SharedArrayBuffer === 'undefined' ||
-    !globalThis.crossOriginIsolated
+    !globalThis.crossOriginIsolated ||
+    // A 2 GB wasm heap is a desktop-class workload — a failed allocation on a
+    // phone often kills the tab instead of throwing, so gate it out here.
+    /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ||
+    // iPadOS reports a desktop "Macintosh" UA — detect it via touch points.
+    (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)) ||
+    (deviceMemory !== undefined && deviceMemory < 8)
   ) {
     throw new MuscriptorWorkerError(AnalysisErrorCode.BackendUnavailable);
   }
@@ -175,11 +184,14 @@ async function initializeModule(jobId: number): Promise<MuscriptorModule> {
   const { default: createModule } = (await import(
     /* @vite-ignore */ moduleUrl
   )) as { default: () => Promise<MuscriptorModule> };
+  return createModule();
+}
 
-  const [module, modelBytes] = await Promise.all([
-    createModule(),
-    fetchModelBytes(jobId),
-  ]);
+async function loadModelInto(
+  module: MuscriptorModule,
+  jobId: number,
+): Promise<void> {
+  const modelBytes = await fetchModelBytes(jobId);
 
   postMessageToClient({
     type: WorkerMessageType.Progress,
@@ -196,22 +208,33 @@ async function initializeModule(jobId: number): Promise<MuscriptorModule> {
     2,
     Math.min(16, navigator.hardwareConcurrency || 4),
   );
-  if (!module.loadModel(MODEL_PATH_IN_FS, threads)) {
-    throw new MuscriptorWorkerError(AnalysisErrorCode.ModelLoadFailed);
+  try {
+    if (!module.loadModel(MODEL_PATH_IN_FS, threads)) {
+      throw new MuscriptorWorkerError(AnalysisErrorCode.ModelLoadFailed);
+    }
+  } finally {
+    // Free the ~110 MB MEMFS copy whether loadModel succeeded or not — the
+    // tensors are already in the heap on success, and on failure the file is
+    // rewritten on the next attempt anyway.
+    module.FS.unlink(MODEL_PATH_IN_FS);
   }
-  // The GGUF's tensors are loaded — the ~110 MB MEMFS copy is dead weight.
-  module.FS.unlink(MODEL_PATH_IN_FS);
-  return module;
 }
 
-function getModule(jobId: number): Promise<MuscriptorModule> {
+async function getModule(jobId: number): Promise<MuscriptorModule> {
   if (modulePromise === null) {
-    modulePromise = initializeModule(jobId).catch(error => {
+    modulePromise = createModuleInstance().catch(error => {
       modulePromise = null;
       throw error;
     });
   }
-  return modulePromise;
+  // Model loading is separate from module creation: a failed loadModel retry
+  // reuses the same module instead of orphaning a 2 GB heap + pthread pool.
+  const module = await modulePromise;
+  if (!modelReady) {
+    await loadModelInto(module, jobId);
+    modelReady = true;
+  }
+  return module;
 }
 
 function parseEvents(json: string): MuscriptorEvent[] {
@@ -278,6 +301,36 @@ function parseEventStrings(rawEvents: unknown): MuscriptorEvent[] {
     }
   }
   return events;
+}
+
+// The engine emits {"type":"progress","completed":N,"total":M} artifacts after
+// each decoded segment — completed segments cover completed * CHUNK_SECONDS.
+function parseProgressSeconds(rawEvents: unknown): number | undefined {
+  if (!Array.isArray(rawEvents)) {
+    return undefined;
+  }
+  let completed = 0;
+  for (const raw of rawEvents) {
+    if (typeof raw !== 'string') {
+      continue;
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        (parsed as { type?: unknown }).type === 'progress'
+      ) {
+        const done = (parsed as { completed?: unknown }).completed;
+        if (typeof done === 'number' && done > completed) {
+          completed = done;
+        }
+      }
+    } catch {
+      // Skip malformed payloads.
+    }
+  }
+  return completed > 0 ? completed * CHUNK_SECONDS : undefined;
 }
 
 const MIDI_PPQ = 480;
@@ -500,74 +553,100 @@ async function analyze(request: {
 
   const module = await getModule(request.jobId);
 
-  const beginError = module.streamBegin(MODEL_SAMPLE_RATE, 1);
-  if (isValError(beginError)) {
-    throw beginError;
-  }
-
-  const durationSeconds = request.samples.length / MODEL_SAMPLE_RATE;
-  const chunkFrames = CHUNK_SECONDS * MODEL_SAMPLE_RATE;
-  const chunkCount = Math.ceil(request.samples.length / chunkFrames);
-  const openNotes = new Map<number, TimedNote & { pitchMidi: number }>();
-  const notes: TimedNote[] = [];
-  let lastProgress = 0;
-
-  const reportTranscribe = (progress: number, incremental: TimedNote[]) => {
-    lastProgress = Math.max(lastProgress, Math.min(1, Math.max(0, progress)));
-    postMessageToClient({
-      type: WorkerMessageType.Progress,
-      jobId: request.jobId,
-      progress: lastProgress,
-      stage: 'transcribe',
-      notes: incremental.map(note => ({
-        pitchMidi: note.pitchMidi,
-        amplitude: note.amplitude,
-        startFrame: 0,
-        endFrame: 0,
-        startTimeSeconds: note.startTimeSeconds,
-        endTimeSeconds: note.endTimeSeconds,
-      })),
-    });
-  };
-
-  for (let chunk = 0; chunk < chunkCount; chunk += 1) {
-    const start = chunk * chunkFrames;
-    const end = Math.min(request.samples.length, start + chunkFrames);
-    const pushed = module.streamPush(
-      request.samples.subarray(start, end),
-      MODEL_SAMPLE_RATE,
-      start / MODEL_SAMPLE_RATE,
-    );
-    if (isValError(pushed)) {
-      throw pushed;
+  try {
+    const beginError = module.streamBegin(MODEL_SAMPLE_RATE, 1);
+    if (isValError(beginError)) {
+      throw beginError;
     }
-    const before = notes.length;
-    pairEvents(parseEventStrings(pushed), openNotes, notes);
-    // Pushes only buffer audio — the decode runs inside streamFinish, so cap
-    // progress at 85% rather than reporting a misleading 100% mid-flight.
-    reportTranscribe(0.85 * ((chunk + 1) / chunkCount), notes.slice(before));
-  }
 
-  const finished = module.streamFinish();
-  if (typeof finished.error === 'string' && finished.error.length > 0) {
-    throw new Error(finished.error);
-  }
-  if (typeof finished.eventsJson === 'string') {
-    pairEvents(parseEvents(finished.eventsJson), openNotes, notes);
-  }
-  for (const open of openNotes.values()) {
-    if (open.endTimeSeconds > open.startTimeSeconds) {
-      notes.push({
-        pitchMidi: open.pitchMidi,
-        amplitude: open.amplitude,
-        startTimeSeconds: open.startTimeSeconds,
-        endTimeSeconds: open.endTimeSeconds,
-        instrument: open.instrument,
+    const durationSeconds = request.samples.length / MODEL_SAMPLE_RATE;
+    const chunkFrames = CHUNK_SECONDS * MODEL_SAMPLE_RATE;
+    const chunkCount = Math.ceil(request.samples.length / chunkFrames);
+    const openNotes = new Map<number, TimedNote & { pitchMidi: number }>();
+    const notes: TimedNote[] = [];
+    let streamedEventCount = 0;
+    let lastProgress = 0;
+
+    const reportTranscribe = (
+      progress: number,
+      incremental: TimedNote[],
+      refinedSeconds?: number,
+    ) => {
+      lastProgress = Math.max(lastProgress, Math.min(1, Math.max(0, progress)));
+      postMessageToClient({
+        type: WorkerMessageType.Progress,
+        jobId: request.jobId,
+        progress: lastProgress,
+        stage: 'transcribe',
+        refinedSeconds,
+        notes: incremental.map(note => ({
+          pitchMidi: note.pitchMidi,
+          amplitude: note.amplitude,
+          startFrame: 0,
+          endFrame: 0,
+          startTimeSeconds: note.startTimeSeconds,
+          endTimeSeconds: note.endTimeSeconds,
+          instrument: note.instrument,
+        })),
       });
-    }
-  }
+    };
 
-  return buildResult(notes, durationSeconds, encodeMidi(notes));
+    for (let chunk = 0; chunk < chunkCount; chunk += 1) {
+      const start = chunk * chunkFrames;
+      const end = Math.min(request.samples.length, start + chunkFrames);
+      const pushed = module.streamPush(
+        request.samples.subarray(start, end),
+        MODEL_SAMPLE_RATE,
+        start / MODEL_SAMPLE_RATE,
+      );
+      if (isValError(pushed)) {
+        throw pushed;
+      }
+      const before = notes.length;
+      const events = parseEventStrings(pushed);
+      streamedEventCount += events.length;
+      pairEvents(events, openNotes, notes);
+      // Each push decodes the newly completed 5 s segment, so pushed fraction
+      // is real progress; the tail segment + result encode run in streamFinish.
+      reportTranscribe(
+        0.95 * ((chunk + 1) / chunkCount),
+        notes.slice(before),
+        parseProgressSeconds(pushed),
+      );
+    }
+
+    const finished = module.streamFinish();
+    if (typeof finished.error === 'string' && finished.error.length > 0) {
+      throw new Error(finished.error);
+    }
+    if (typeof finished.eventsJson === 'string') {
+      // eventsJson repeats every event from the start — skip the prefix that
+      // already streamed through streamPush.
+      pairEvents(parseEvents(finished.eventsJson).slice(streamedEventCount), openNotes, notes);
+    }
+    for (const open of openNotes.values()) {
+      if (open.endTimeSeconds > open.startTimeSeconds) {
+        notes.push({
+          pitchMidi: open.pitchMidi,
+          amplitude: open.amplitude,
+          startTimeSeconds: open.startTimeSeconds,
+          endTimeSeconds: open.endTimeSeconds,
+          instrument: open.instrument,
+        });
+      }
+    }
+
+    return buildResult(notes, durationSeconds, encodeMidi(notes));
+  } catch (error) {
+    // Drop the in-flight stream and its buffered audio so the next run starts
+    // on a clean session. May itself throw if the wasm instance aborted.
+    try {
+      module.streamAbort?.();
+    } catch {
+      // Module is dead — the client will recycle the worker.
+    }
+    throw error;
+  }
 }
 
 function toErrorCode(error: unknown): AnalysisErrorCode {

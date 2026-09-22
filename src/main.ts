@@ -3,6 +3,7 @@ import { AnalysisErrorCode, AnalysisPhase, type AnalysisResult, type AnalyzedNot
 import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-player';
 import { FastSpectrumClient, FastSpectrumClientError } from './fast-spectrum';
 import type { FastSpectrumOptions } from './fast-spectrum-analysis';
+import { cachePrecise, fingerprintFile, getCachedPrecise, midiFromBase64, midiToBase64, type CachedPrecise } from './precise-cache';
 import { PianoRollRenderer } from './piano-roll-renderer';
 import { PianoAudition } from './piano-audition';
 import { WaveformTimeline } from './waveform-timeline';
@@ -221,6 +222,7 @@ let animationFrameId: number | null = null;
 let scrubbing = false;
 let disposed = false;
 let decodedSamples: Float32Array | null = null;
+let currentFileHash: string | null = null;
 let fullFastSpectrumReady = false;
 let recognitionMode = RecognitionMode.Instant;
 let fastAnalysisResult: AnalysisResult | null = null;
@@ -230,6 +232,7 @@ let preciseAnalysisProgress = 0;
 let preciseModelReadyOnDevice = readPreciseModelReadyHint();
 let muscriptorUnavailable = false;
 let incrementalNotes: AnalyzedNote[] = [];
+let refinedUpToSeconds = 0;
 let partialFrameTimestamps: Float32Array | null = null;
 let partialFrameProbabilities: Uint8Array | null = null;
 let analysisSensitivity = 0.5;
@@ -587,6 +590,7 @@ async function loadFile(file: File): Promise<void> {
   waveformTimeline.clear();
   cancelAnimation();
   decodedSamples = null;
+  currentFileHash = null;
   fullFastSpectrumReady = false;
   fastReanalyzePending = false;
   if (reanalyzeTimer !== null) {
@@ -599,6 +603,7 @@ async function loadFile(file: File): Promise<void> {
   preciseAnalysisProgress = 0;
   muscriptorUnavailable = false;
   incrementalNotes = [];
+  refinedUpToSeconds = 0;
   partialFrameTimestamps = null;
   partialFrameProbabilities = null;
   elements.midiDownloadButton.hidden = true;
@@ -617,6 +622,13 @@ async function loadFile(file: File): Promise<void> {
   let hasFullFastSpectrum = false;
 
   try {
+    // Fingerprint in parallel with decoding — used to look up a cached
+    // precise result for this exact file later.
+    void fingerprintFile(file).then(hash => {
+      if (hash !== null && generation === analysisGeneration) {
+        currentFileHash = hash;
+      }
+    });
     const decoded = await audioPlayer.load(file);
     if (generation !== analysisGeneration) {
       return;
@@ -846,6 +858,7 @@ async function refineWithModel(): Promise<void> {
   preciseAnalysisInProgress = true;
   preciseAnalysisProgress = 0;
   incrementalNotes = [];
+  refinedUpToSeconds = 0;
   partialFrameTimestamps = null;
   partialFrameProbabilities = null;
   clearError();
@@ -885,21 +898,34 @@ async function refineWithModel(): Promise<void> {
 }
 
 async function runPreciseAnalysis(samples: Float32Array, generation: number): Promise<AnalysisResult> {
+  const fileHash = currentFileHash;
+  if (fileHash !== null) {
+    const cached = getCachedPrecise(fileHash);
+    if (cached !== null) {
+      return resultFromCache(cached);
+    }
+  }
   if (!muscriptorUnavailable) {
     try {
-      return await muscriptorClient.analyze(samples.slice(), {
-        onProgress: (progress, notes, stage) => {
+      const result = await muscriptorClient.analyze(samples.slice(), {
+        onProgress: (progress, notes, stage, refinedSeconds) => {
           if (generation !== analysisGeneration) {
             return;
           }
           preciseAnalysisProgress = progress;
+          if (refinedSeconds !== undefined) {
+            refinedUpToSeconds = refinedSeconds;
+          }
           if (notes !== undefined && notes.length > 0) {
             pushIncrementalNotes(notes);
-            if (recognitionMode === RecognitionMode.Precise) {
-              const partial = buildPartialResult();
-              if (partial !== null) {
-                renderer.setAnalysisPreservingViewport(partial, audioPlayer.durationSeconds);
-              }
+          }
+          if (
+            recognitionMode === RecognitionMode.Precise &&
+            (refinedSeconds !== undefined || (notes !== undefined && notes.length > 0))
+          ) {
+            const partial = buildPartialResult();
+            if (partial !== null) {
+              renderer.setAnalysisPreservingViewport(partial, audioPlayer.durationSeconds);
             }
           }
           if (recognitionMode !== RecognitionMode.Precise) {
@@ -913,7 +939,24 @@ async function runPreciseAnalysis(samples: Float32Array, generation: number): Pr
           setPhase(AnalysisPhase.Refining, progress, stageLabel);
         },
       });
+      if (fileHash !== null) {
+        cachePrecise(fileHash, {
+          durationSeconds: audioPlayer.durationSeconds,
+          notes: result.notes.map(note => ({
+            pitchMidi: note.pitchMidi,
+            amplitude: note.amplitude,
+            startTimeSeconds: note.startTimeSeconds,
+            endTimeSeconds: note.endTimeSeconds,
+            instrument: note.instrument,
+          })),
+          midiBase64: result.midiBytes !== undefined ? midiToBase64(result.midiBytes) : undefined,
+        });
+      }
+      return result;
     } catch (error) {
+      // A failed run may leave the wasm instance aborted; recycle the worker
+      // so a retry starts from a clean module instead of a dead one.
+      muscriptorClient.cancel();
       if (
         error instanceof AnalysisClientError &&
         (error.code === AnalysisErrorCode.BackendUnavailable ||
@@ -943,6 +986,31 @@ async function runPreciseAnalysis(samples: Float32Array, generation: number): Pr
 const PARTIAL_FRAMES_PER_SECOND = 22050 / 256;
 const PARTIAL_PITCH_COUNT = 88;
 const PARTIAL_BASE_PITCH = 21;
+// Fast spectrum runs at 22050 Hz with a 2048-sample hop.
+const FAST_FRAMES_PER_SECOND = 22050 / 2048;
+
+function paintPartialNote(
+  probabilities: Uint8Array,
+  frameCount: number,
+  note: Pick<AnalyzedNote, 'pitchMidi' | 'amplitude' | 'startTimeSeconds' | 'endTimeSeconds'>,
+): void {
+  const startFrame = Math.max(0, Math.floor(note.startTimeSeconds * PARTIAL_FRAMES_PER_SECOND));
+  const endFrame = Math.min(
+    frameCount,
+    Math.max(startFrame + 1, Math.ceil(note.endTimeSeconds * PARTIAL_FRAMES_PER_SECOND)),
+  );
+  const row = note.pitchMidi - PARTIAL_BASE_PITCH;
+  if (row < 0 || row >= PARTIAL_PITCH_COUNT) {
+    return;
+  }
+  const amplitude = Math.round(Math.max(0, Math.min(1, note.amplitude)) * 255);
+  for (let frame = startFrame; frame < endFrame; frame += 1) {
+    const index = frame * PARTIAL_PITCH_COUNT + row;
+    if (amplitude > probabilities[index]) {
+      probabilities[index] = amplitude;
+    }
+  }
+}
 
 function pushIncrementalNotes(notes: AnalyzedNote[]): void {
   const durationSeconds = audioPlayer.durationSeconds;
@@ -965,37 +1033,122 @@ function pushIncrementalNotes(notes: AnalyzedNote[]): void {
   }
   const toMark = reallocated ? incrementalNotes.concat(notes) : notes;
   for (const note of toMark) {
-    const startFrame = Math.max(0, Math.floor(note.startTimeSeconds * PARTIAL_FRAMES_PER_SECOND));
+    note.startFrame = Math.max(0, Math.floor(note.startTimeSeconds * PARTIAL_FRAMES_PER_SECOND));
+    note.endFrame = Math.min(
+      frameCount,
+      Math.max(note.startFrame + 1, Math.ceil(note.endTimeSeconds * PARTIAL_FRAMES_PER_SECOND)),
+    );
+    paintPartialNote(probabilities, frameCount, note);
+  }
+  incrementalNotes.push(...notes);
+}
+
+// Rebuilds a full AnalysisResult from cached notes — the frame grid is
+// derived data, painted the same way the worker's buildResult does.
+function resultFromCache(cached: CachedPrecise): AnalysisResult {
+  const frameCount = Math.max(1, Math.ceil(cached.durationSeconds * PARTIAL_FRAMES_PER_SECOND));
+  const frameTimestamps = new Float32Array(frameCount);
+  const frameProbabilities = new Uint8Array(frameCount * PARTIAL_PITCH_COUNT);
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    frameTimestamps[frame] = frame / PARTIAL_FRAMES_PER_SECOND;
+  }
+  const notes: AnalyzedNote[] = [];
+  for (const note of cached.notes) {
+    const startFrame = Math.min(
+      frameCount - 1,
+      Math.max(0, Math.floor(note.startTimeSeconds * PARTIAL_FRAMES_PER_SECOND)),
+    );
     const endFrame = Math.min(
       frameCount,
       Math.max(startFrame + 1, Math.ceil(note.endTimeSeconds * PARTIAL_FRAMES_PER_SECOND)),
     );
-    note.startFrame = startFrame;
-    note.endFrame = endFrame;
     const row = note.pitchMidi - PARTIAL_BASE_PITCH;
-    if (row < 0 || row >= PARTIAL_PITCH_COUNT) {
-      continue;
-    }
-    const amplitude = Math.round(Math.max(0, Math.min(1, note.amplitude)) * 255);
-    for (let frame = startFrame; frame < endFrame; frame += 1) {
-      const index = frame * PARTIAL_PITCH_COUNT + row;
-      if (amplitude > probabilities[index]) {
-        probabilities[index] = amplitude;
+    if (row >= 0 && row < PARTIAL_PITCH_COUNT) {
+      const cell = Math.round(Math.max(0, Math.min(1, note.amplitude)) * 255);
+      for (let frame = startFrame; frame < endFrame; frame += 1) {
+        frameProbabilities[frame * PARTIAL_PITCH_COUNT + row] = cell;
       }
     }
+    notes.push({
+      pitchMidi: note.pitchMidi,
+      amplitude: note.amplitude,
+      startFrame,
+      endFrame,
+      startTimeSeconds: note.startTimeSeconds,
+      endTimeSeconds: note.endTimeSeconds,
+      instrument: note.instrument,
+    });
   }
-  incrementalNotes.push(...notes);
+  const result: AnalysisResult = {
+    notes,
+    frameCount,
+    pitchCount: PARTIAL_PITCH_COUNT,
+    frameProbabilities,
+    frameTimestamps,
+  };
+  if (cached.midiBase64 !== undefined) {
+    result.midiBytes = midiFromBase64(cached.midiBase64);
+  }
+  return result;
 }
 
 function buildPartialResult(): AnalysisResult | null {
   if (partialFrameTimestamps === null || partialFrameProbabilities === null) {
     return null;
   }
+  const frameCount = partialFrameTimestamps.length;
+  const probabilities = partialFrameProbabilities;
+  const fast = fastAnalysisResult;
+  const notes = incrementalNotes.slice();
+  if (fast !== null) {
+    // Past the refined boundary the fast spectrum is still shown — resampled
+    // onto the partial grid — so the view reads as refinement sweeping
+    // left-to-right instead of fast notes vanishing at once.
+    const boundaryFrame = Math.min(
+      frameCount,
+      Math.max(0, Math.ceil(refinedUpToSeconds * PARTIAL_FRAMES_PER_SECOND)),
+    );
+    for (let frame = boundaryFrame; frame < frameCount; frame += 1) {
+      const fastFrame = Math.min(
+        fast.frameCount - 1,
+        Math.floor(partialFrameTimestamps[frame] * FAST_FRAMES_PER_SECOND),
+      );
+      probabilities.set(
+        fast.frameProbabilities.subarray(
+          fastFrame * fast.pitchCount,
+          fastFrame * fast.pitchCount + fast.pitchCount,
+        ),
+        frame * PARTIAL_PITCH_COUNT,
+      );
+    }
+    // Precise notes may extend past the boundary — repaint them on top.
+    for (const note of incrementalNotes) {
+      paintPartialNote(probabilities, frameCount, note);
+    }
+    for (const note of fast.notes) {
+      if (note.startTimeSeconds < refinedUpToSeconds) {
+        continue;
+      }
+      const startFrame = Math.max(0, Math.floor(note.startTimeSeconds * PARTIAL_FRAMES_PER_SECOND));
+      notes.push({
+        pitchMidi: note.pitchMidi,
+        amplitude: note.amplitude,
+        startFrame: Math.min(frameCount - 1, startFrame),
+        endFrame: Math.min(
+          frameCount,
+          Math.max(startFrame + 1, Math.ceil(note.endTimeSeconds * PARTIAL_FRAMES_PER_SECOND)),
+        ),
+        startTimeSeconds: note.startTimeSeconds,
+        endTimeSeconds: note.endTimeSeconds,
+      });
+    }
+    notes.sort((left, right) => left.startTimeSeconds - right.startTimeSeconds);
+  }
   return {
-    notes: incrementalNotes,
-    frameCount: partialFrameTimestamps.length,
+    notes,
+    frameCount,
     pitchCount: PARTIAL_PITCH_COUNT,
-    frameProbabilities: partialFrameProbabilities,
+    frameProbabilities: probabilities,
     frameTimestamps: partialFrameTimestamps,
   };
 }

@@ -32,7 +32,7 @@ export class AudioPlayer {
   private readonly context = new AudioContext();
   private readonly element: PitchPreservingMediaElement = new Audio();
   private objectUrl: string | null = null;
-  private buffer: AudioBuffer | null = null;
+  private duration = 0;
   private playing = false;
   private loadToken = 0;
   private playToken = 0;
@@ -52,7 +52,7 @@ export class AudioPlayer {
   }
 
   public get durationSeconds(): number {
-    return this.buffer?.duration ?? 0;
+    return this.duration;
   }
 
   public get isPlaying(): boolean {
@@ -93,14 +93,16 @@ export class AudioPlayer {
       URL.revokeObjectURL(this.objectUrl);
     }
     this.objectUrl = objectUrl;
-    this.buffer = decodedBuffer;
+    // Only the duration is needed — the element plays the file itself, so the
+    // decoded AudioBuffer (~200 MB for a long file) is released here.
+    this.duration = decodedBuffer.duration;
     this.notifyStateChange();
 
     return { samples, durationSeconds: decodedBuffer.duration };
   }
 
   public async play(): Promise<void> {
-    if (this.buffer === null || this.playing) {
+    if (this.objectUrl === null || this.playing) {
       return;
     }
 
@@ -118,7 +120,7 @@ export class AudioPlayer {
     if (
       playToken !== this.playToken ||
       this.disposed ||
-      this.buffer === null
+      this.objectUrl === null
     ) {
       this.element.pause();
       return;
@@ -165,7 +167,7 @@ export class AudioPlayer {
     this.loadToken += 1;
     this.playToken += 1;
     this.stopPlayback();
-    this.buffer = null;
+    this.duration = 0;
     this.element.removeAttribute('src');
     this.element.load();
     if (this.objectUrl !== null) {

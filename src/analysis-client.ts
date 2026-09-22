@@ -110,7 +110,7 @@ export class AnalysisClient {
     }
 
     if (message.type === WorkerMessageType.Progress) {
-      job.callbacks.onProgress?.(message.progress, message.notes, message.stage);
+      job.callbacks.onProgress?.(message.progress, message.notes, message.stage, message.refinedSeconds);
       return;
     }
 

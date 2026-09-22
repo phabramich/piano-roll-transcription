@@ -41,15 +41,16 @@ INCLUDES="-I$AUDIOCPP/include -I$BUILD/generated \
 em++ $CXXFLAGS $INCLUDES -o "$BUILD/audiocpp_capi.o" -c "$AUDIOCPP/src/capi/audiocpp.cpp"
 em++ $CXXFLAGS $INCLUDES -o "$BUILD/muscriptor_driver.o" -c "$APP/wasm/muscriptor_driver.cpp"
 
-# 3. Link the ES-module bundle. Fixed 2 GB shared memory (ALLOW_MEMORY_GROWTH
-#    with pthreads is slow, and the model's graph arenas are shrunk in the
-#    driver to fit). PTHREAD_POOL_SIZE must exceed the ggml worker count.
+# 3. Link the ES-module bundle. Fixed 3 GB shared memory (ALLOW_MEMORY_GROWTH
+#    with pthreads is slow; measured decode peak is ~2.1 GB, flat vs duration,
+#    so 3 GB covers it with headroom — 2 GB OOMed inside stream_finish).
+#    PTHREAD_POOL_SIZE must exceed the ggml worker count.
 mkdir -p "$OUT"
 em++ -pthread -fexceptions -msimd128 -O3 -DNDEBUG \
   --bind \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createMuscriptorModule \
   -sENVIRONMENT=web,worker \
-  -sINITIAL_MEMORY=2147483648 \
+  -sINITIAL_MEMORY=3221225472 \
   -sSTACK_SIZE=1048576 \
   -sPTHREAD_POOL_SIZE=16 \
   -sEXIT_RUNTIME=0 \

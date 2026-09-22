@@ -67,6 +67,8 @@ export interface AnalysisProgressWorkerMessage {
   progress: number;
   stage?: 'model' | 'prepare' | 'transcribe';
   notes?: AnalyzedNote[];
+  /** Seconds of audio fully decoded by the precise engine so far. */
+  refinedSeconds?: number;
 }
 
 export interface AnalysisResultWorkerMessage {
@@ -94,5 +96,6 @@ export interface AnalysisCallbacks {
     progress: number,
     incrementalNotes?: AnalyzedNote[],
     stage?: 'model' | 'prepare' | 'transcribe',
+    refinedSeconds?: number,
   ) => void;
 }

@@ -81,33 +81,37 @@ std::vector<float> toVector(const emscripten::val & pcm) {
     return emscripten::convertJSArrayToNumberVector<float>(pcm);
 }
 
-emscripten::val drainEvents() {
-    emscripten::val events = emscripten::val::array();
+void appendArtifacts(const audiocpp_result * result, const emscripten::val & events) {
+    if (result == nullptr) {
+        return;
+    }
+    const size_t artifact_count = audiocpp_result_artifact_count(result);
+    for (size_t i = 0; i < artifact_count; ++i) {
+        audiocpp_artifact_kind kind;
+        const char * id = nullptr;
+        const void * payload = nullptr;
+        size_t payload_bytes = 0;
+        if (audiocpp_result_artifact(result, i, &kind, &id, &payload,
+                                     &payload_bytes) != AUDIOCPP_OK ||
+            payload == nullptr) {
+            continue;
+        }
+        events.call<void>(
+            "push",
+            std::string(static_cast<const char *>(payload), payload_bytes));
+    }
+}
+
+void drainEventsInto(const emscripten::val & events) {
     for (;;) {
         audiocpp_event * event = nullptr;
         if (audiocpp_stream_next_event(g_engine.session, &event) != AUDIOCPP_OK ||
             event == nullptr) {
             break;
         }
-        const audiocpp_result * result = audiocpp_event_as_result(event);
-        const size_t artifact_count = audiocpp_result_artifact_count(result);
-        for (size_t i = 0; i < artifact_count; ++i) {
-            audiocpp_artifact_kind kind;
-            const char * id = nullptr;
-            const void * payload = nullptr;
-            size_t payload_bytes = 0;
-            if (audiocpp_result_artifact(result, i, &kind, &id, &payload,
-                                         &payload_bytes) != AUDIOCPP_OK ||
-                payload == nullptr) {
-                continue;
-            }
-            events.call<void>(
-                "push",
-                std::string(static_cast<const char *>(payload), payload_bytes));
-        }
+        appendArtifacts(audiocpp_event_as_result(event), events);
         audiocpp_event_free(event);
     }
-    return events;
 }
 
 emscripten::val streamBegin(int sampleRate, int channels) {
@@ -143,13 +147,18 @@ emscripten::val streamPush(const emscripten::val & pcm, int sampleRate,
     const audiocpp_status status = audiocpp_stream_push(
         g_engine.session, samples.data(), samples.size(), sampleRate, 1,
         static_cast<int64_t>(startSeconds * sampleRate), &produced);
+    /* The push decodes newly completed 5 s segments eagerly; note events it
+     * produced ride back on the returned event's artifacts. */
+    emscripten::val events = emscripten::val::array();
+    if (produced != nullptr) {
+        appendArtifacts(audiocpp_event_as_result(produced), events);
+        audiocpp_event_free(produced);
+    }
     if (status != AUDIOCPP_OK) {
         return emscripten::val::global("Error").new_(lastError());
     }
-    if (produced != nullptr) {
-        audiocpp_event_free(produced);
-    }
-    return drainEvents();
+    drainEventsInto(events);
+    return events;
 }
 
 emscripten::val streamFinish() {
@@ -161,6 +170,12 @@ emscripten::val streamFinish() {
     audiocpp_result * result = nullptr;
     if (audiocpp_stream_finish(g_engine.session, &result) != AUDIOCPP_OK ||
         result == nullptr) {
+        /* A failed finish leaves the stream (and its buffered audio) in
+         * flight — reset so the heap is released before the next run. */
+        if (result != nullptr) {
+            audiocpp_result_free(result);
+        }
+        audiocpp_stream_reset(g_engine.session);
         out.set("error", lastError());
         return out;
     }
@@ -194,6 +209,12 @@ emscripten::val streamFinish() {
     return out;
 }
 
+void streamAbort() {
+    if (g_engine.session != nullptr) {
+        audiocpp_stream_reset(g_engine.session);
+    }
+}
+
 void unload() {
     if (g_engine.session != nullptr) {
         audiocpp_session_free(g_engine.session);
@@ -216,6 +237,7 @@ EMSCRIPTEN_BINDINGS(muscriptor) {
     emscripten::function("streamBegin", &streamBegin);
     emscripten::function("streamPush", &streamPush);
     emscripten::function("streamFinish", &streamFinish);
+    emscripten::function("streamAbort", &streamAbort);
     emscripten::function("unload", &unload);
     emscripten::function("lastError", &lastError);
 }
