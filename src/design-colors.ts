@@ -1,15 +1,49 @@
-export const DESIGN_COLORS = {
-  background: '#F7F4F8',
+export interface DesignColors {
+  background: string;
+  canvasBackground: string;
+  surface: string;
+  text: string;
+  grid: string;
+  note: string;
+  keyActive: string;
+  playhead: string;
+  playheadText: string;
+  waveform: string;
+}
+
+const LIGHT_COLORS: DesignColors = {
+  background: '#F7F8F7',
   canvasBackground: '#FFFFFF',
   surface: '#FFFFFF',
-  text: '#24232D',
-  grid: '#E1DCE3',
-  note: '#6D3CF7',
-  keyActive: '#00ABB8',
-  playhead: '#DD3FA3',
+  text: '#1E2423',
+  grid: '#E4EAE6',
+  note: '#7C3AED',
+  keyActive: '#FFB03C',
+  playhead: '#E0245E',
   playheadText: '#17131D',
-  waveform: '#B7B0BC',
-} as const;
+  waveform: '#AEBFC3',
+};
+
+const DARK_COLORS: DesignColors = {
+  background: '#14323D',
+  canvasBackground: '#183A46',
+  surface: '#1C3F4B',
+  text: '#ECE7D3',
+  grid: '#22424E',
+  note: '#B48CFF',
+  keyActive: '#FFB03C',
+  playhead: '#FF5C7A',
+  playheadText: '#1C1206',
+  waveform: '#3D5C68',
+};
+
+// Mutable on purpose: renderers read it every frame, so a theme switch just
+// swaps values in place and the next paint picks them up.
+export const DESIGN_COLORS: DesignColors = { ...LIGHT_COLORS };
+
+export function applyDesignTheme(theme: 'light' | 'dark'): void {
+  Object.assign(DESIGN_COLORS, theme === 'dark' ? DARK_COLORS : LIGHT_COLORS);
+}
 
 const INSTRUMENT_FAMILY_COLORS: Record<string, string> = {
   acoustic_piano: '#6D3CF7',

@@ -36,7 +36,6 @@ export class AudioPlayer {
   private playing = false;
   private loadToken = 0;
   private playToken = 0;
-  private disposed = false;
 
   public onStateChange: (() => void) | null = null;
 
@@ -117,11 +116,7 @@ export class AudioPlayer {
       return;
     }
 
-    if (
-      playToken !== this.playToken ||
-      this.disposed ||
-      this.objectUrl === null
-    ) {
+    if (playToken !== this.playToken || this.objectUrl === null) {
       this.element.pause();
       return;
     }
@@ -151,7 +146,7 @@ export class AudioPlayer {
   }
 
   public setPlaybackRate(rate: number): void {
-    if (this.disposed || !Number.isFinite(rate)) {
+    if (!Number.isFinite(rate)) {
       return;
     }
 
@@ -175,17 +170,6 @@ export class AudioPlayer {
       this.objectUrl = null;
     }
     this.notifyStateChange();
-  }
-
-  public dispose(): void {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    this.loadToken += 1;
-    this.playToken += 1;
-    this.reset();
-    void this.context.close().catch(() => undefined);
   }
 
   private stopPlayback(): void {

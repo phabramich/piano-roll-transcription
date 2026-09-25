@@ -1,62 +1,59 @@
-import { AnalysisErrorCode, type AnalysisResult } from './analysis-types';
-import { FastSpectrumAnalyzer } from './fast-spectrum-analysis';
-import type { FastSpectrumOptions } from './fast-spectrum-analysis';
 import {
-  FastSpectrumWorkerMessageType,
-  type FastSpectrumAnalyzeRequest,
-  type FastSpectrumWorkerResponse,
-} from './fast-spectrum';
+  AnalysisErrorCode,
+  type AnalysisResult,
+  type AnalysisWorkerRequest,
+  type AnalysisWorkerResponse,
+  WorkerMessageType,
+} from './analysis-types';
+import { FastSpectrumAnalyzer } from './fast-spectrum-analysis';
 
 function postMessageToClient(
-  response: FastSpectrumWorkerResponse,
+  response: AnalysisWorkerResponse,
   transfer: Transferable[] = [],
 ): void {
   self.postMessage(response, transfer);
 }
 
-self.addEventListener('message', (event: MessageEvent<FastSpectrumAnalyzeRequest>) => {
+function transferOf(result: AnalysisResult): Transferable[] {
+  return [result.frameProbabilities.buffer, result.frameTimestamps.buffer];
+}
+
+self.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) => {
   const request = event.data;
-  if (request.type !== FastSpectrumWorkerMessageType.Analyze) {
+  if (request.type !== WorkerMessageType.Analyze) {
     return;
   }
 
   try {
     const analyzer = new FastSpectrumAnalyzer(request.samples);
-    // `options` is added to the request in parallel — read it defensively so
-    // this compiles and runs whether or not the field is present yet.
-    analyzer.configure((request as { options?: FastSpectrumOptions }).options ?? {});
+    analyzer.configure(request.options ?? {});
     const previewFrameCount = analyzer.frameCountForSeconds(30);
     analyzer.analyzeFrames(0, previewFrameCount);
-    postPreview(request.jobId, analyzer.toResult(previewFrameCount));
+    const preview = analyzer.toResult(previewFrameCount);
+    postMessageToClient(
+      {
+        type: WorkerMessageType.Progress,
+        jobId: request.jobId,
+        progress: 0,
+        preview,
+      },
+      transferOf(preview),
+    );
     analyzer.analyzeFrames(previewFrameCount, analyzer.frameCount);
-    postResult(request.jobId, analyzer.toResult(analyzer.frameCount));
+    const result = analyzer.toResult(analyzer.frameCount);
+    postMessageToClient(
+      {
+        type: WorkerMessageType.Result,
+        jobId: request.jobId,
+        result,
+      },
+      transferOf(result),
+    );
   } catch {
     postMessageToClient({
-      type: FastSpectrumWorkerMessageType.Error,
+      type: WorkerMessageType.Error,
       jobId: request.jobId,
       code: AnalysisErrorCode.AnalysisFailed,
     });
   }
 });
-
-function postResult(jobId: number, result: AnalysisResult): void {
-  postMessageToClient(
-    {
-      type: FastSpectrumWorkerMessageType.Result,
-      jobId,
-      result,
-    },
-    [result.frameProbabilities.buffer, result.frameTimestamps.buffer],
-  );
-}
-
-function postPreview(jobId: number, result: AnalysisResult): void {
-  postMessageToClient(
-    {
-      type: FastSpectrumWorkerMessageType.Preview,
-      jobId,
-      result,
-    },
-    [result.frameProbabilities.buffer, result.frameTimestamps.buffer],
-  );
-}

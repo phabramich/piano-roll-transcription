@@ -1,14 +1,16 @@
 import { AnalysisClient, AnalysisClientError } from './analysis-client';
-import { AnalysisErrorCode, AnalysisPhase, type AnalysisResult, type AnalyzedNote, RecognitionMode } from './analysis-types';
+import { AnalysisErrorCode, AnalysisPhase, type AnalysisResult, type AnalyzedNote, type FastSpectrumOptions, RecognitionMode } from './analysis-types';
 import { AudioPlayer, AudioPlayerError, AudioPlayerErrorCode } from './audio-player';
-import { FastSpectrumClient, FastSpectrumClientError } from './fast-spectrum';
-import type { FastSpectrumOptions } from './fast-spectrum-analysis';
-import { cachePrecise, fingerprintFile, getCachedPrecise, midiFromBase64, midiToBase64, type CachedPrecise } from './precise-cache';
+import { cachePrecise, clearPreciseCache, fingerprintFile, getCachedPrecise, midiFromBase64, midiToBase64, type CachedPrecise } from './precise-cache';
 import { PianoRollRenderer } from './piano-roll-renderer';
 import { PianoAudition } from './piano-audition';
 import { WaveformTimeline } from './waveform-timeline';
+import { applyDesignTheme } from './design-colors';
 import { ICONS } from './icons';
-import '@fontsource-variable/unbounded';
+import { formatTime } from './util';
+import '@fontsource-variable/bricolage-grotesque';
+import '@fontsource-variable/space-grotesk';
+import '@fontsource-variable/jetbrains-mono';
 import './style.css';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -24,139 +26,340 @@ app.addEventListener('mousedown', event => {
   }
 });
 
+/* ── i18n ─────────────────────────────────────────────── */
+
+const STRINGS = {
+  ru: {
+    dropH: 'Загрузите аудио для транскрибации',
+    dropMeta: 'MP3 · WAV · M4A · до 200 МБ · до 10 минут · файл не покидает устройство',
+    cta: 'Выбрать файл',
+    loadingH: 'Открываем аудио…',
+    loadingSub: 'Подготавливаем дорожку',
+    analyzingH: 'Подготавливаем ноты…',
+    analyzingSub: 'Это займёт немного времени',
+    failH: 'Не удалось обработать файл',
+    failSub: 'Попробуйте выбрать другой аудиофайл',
+    statusIdle: 'Можно выбрать аудиофайл.',
+    statusLoading: 'Открываем аудио.',
+    statusAnalyzing: 'Подготавливаем ноты.',
+    statusPreview: 'Первые ноты готовы. Продолжаем подготовку.',
+    statusPreviewPartial: 'Первые ноты готовы. Полная лента сейчас недоступна.',
+    statusFastReady: 'Быстрый вариант готов. Можно воспроизводить и перематывать.',
+    statusFastOnly: 'Быстрый вариант готов. Точный вариант сейчас недоступен.',
+    statusComplete: 'Точный вариант готов. Партитура готова.',
+    statusFail: 'Не удалось обработать файл.',
+    analysisPreview: 'Первые ноты готовы',
+    updatingNotes: 'Обновляем ноты',
+    statusUpdating: 'Обновляем ноты с новыми настройками.',
+    statusUpdated: 'Ноты обновлены с новыми настройками.',
+    errReanalyze: 'Не удалось пересчитать ноты с новыми настройками. Показан прежний вариант.',
+    statusUpdateFail: 'Не удалось обновить ноты.',
+    stageModel: 'Скачиваем модель',
+    stagePrepare: 'Готовим модель',
+    stageRecognize: 'Распознаём ноты',
+    errPrecise: 'Не удалось подготовить точные ноты. Показан быстрый вариант — можно продолжать слушать запись.',
+    statusPreciseFail: 'Точный вариант не готов. Быстрый вариант сохранён.',
+    errPlay: 'Не удалось запустить воспроизведение. Проверьте разрешение браузера на звук и попробуйте ещё раз.',
+    statusPlayFail: 'Не удалось запустить воспроизведение.',
+    errTooLarge: 'Файл больше 200 МБ. Выберите файл меньшего размера.',
+    errTooLong: 'Длительность записи больше 10 минут. Выберите более короткий файл.',
+    errFormat: 'Формат не поддерживается или аудиофайл повреждён.',
+    errModel: 'Не удалось подготовить точные ноты.',
+    errBackend: 'Браузер не смог продолжить распознавание.',
+    errWorker: 'Распознавание неожиданно остановилось.',
+    errInvalid: 'Запись пуста или не подходит для распознавания.',
+    errAnalysis: 'Распознавание не завершилось.',
+    errGeneric: 'Произошла непредвиденная ошибка. Попробуйте ещё раз.',
+    recovery: 'Выбрать другой файл',
+    fileActions: 'Действия с аудиофайлом',
+    speed: 'Скорость',
+    speedAria: 'Скорость воспроизведения',
+    speedTitle: 'Скорость воспроизведения — высота звука сохраняется',
+    settings: 'Настройки',
+    sens: 'Чувствительность',
+    sensAria: 'Чувствительность анализа',
+    sensTitle: 'Выше — больше нот, ниже — строже отбор',
+    minDur: 'Мин. длительность ноты',
+    minDurAria: 'Минимальная длительность ноты',
+    maxNotes: 'Макс. нот одновременно',
+    maxNotesAria: 'Максимум нот одновременно',
+    contrast: 'Контраст нот',
+    contrastAria: 'Контраст нот — влияет только на отображение',
+    settingsHint: 'Применяются к быстрому анализу — ноты пересчитываются автоматически.',
+    theme: 'Тема',
+    tAuto: 'Авто',
+    tLight: 'Светлая',
+    tDark: 'Тёмная',
+    lang: 'Язык',
+    recMode: 'Режим распознавания',
+    fast: 'Быстро',
+    precise: 'Точнее',
+    preciseHint: 'Первый точный анализ скачает модель MuScriptor — около 110 МБ, дальше она берётся из кэша.',
+    midiAria: 'Скачать MIDI',
+    midiTitle: 'Скачать результат точного анализа как MIDI-файл',
+    replace: 'Новый файл',
+    play: 'Воспроизвести',
+    pause: 'Пауза',
+    spaceKey: 'Пробел',
+    timelineAria: 'Позиция воспроизведения',
+    stageAria: 'Навигация по партитуре',
+    stageToolbarAria: 'Масштаб и диапазон партитуры',
+    zoomOut: 'Уменьшить временной масштаб',
+    zoomIn: 'Увеличить временной масштаб',
+    pitchRange: 'Диапазон',
+    pitchRangeAria: 'Изменить видимый диапазон клавиш',
+    follow: 'Следование',
+    toPosition: 'Следовать',
+    followOn: 'Следование включено',
+    followOff: 'Включить следование',
+    kbdAria: 'Горячие клавиши',
+    canvasAria: 'Падающая партитура. Перетаскивайте для обзора, нажимайте для перехода к позиции и удерживайте, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд.',
+    hints: '<kbd>Space</kbd> пауза&ensp;·&ensp;<kbd>←</kbd><kbd>→</kbd> ±5&thinsp;с&ensp;·&ensp;перетащить — обзор&ensp;·&ensp;нажать — позиция&ensp;·&ensp;удерживать — нота',
+    ms: 'мс',
+    clearCache: 'Очистить кэш',
+    clearCacheTitle: 'Удалить скачанную модель и сохранённые ноты',
+    cacheCleared: 'Кэш очищен',
+  },
+  en: {
+    dropH: 'Upload audio for transcription',
+    dropMeta: 'MP3 · WAV · M4A · up to 200 MB · up to 10 min · file never leaves your device',
+    cta: 'Choose file',
+    loadingH: 'Opening audio…',
+    loadingSub: 'Preparing the track',
+    analyzingH: 'Preparing notes…',
+    analyzingSub: 'This takes a moment',
+    failH: 'Could not process the file',
+    failSub: 'Try a different audio file',
+    statusIdle: 'You can pick an audio file.',
+    statusLoading: 'Opening audio.',
+    statusAnalyzing: 'Preparing notes.',
+    statusPreview: 'First notes are ready. Still preparing.',
+    statusPreviewPartial: 'First notes are ready. Full roll is unavailable right now.',
+    statusFastReady: 'Fast result ready. You can play and scrub.',
+    statusFastOnly: 'Fast result ready. Precise mode is unavailable right now.',
+    statusComplete: 'Precise result ready. The score is done.',
+    statusFail: 'Could not process the file.',
+    analysisPreview: 'First notes ready',
+    updatingNotes: 'Updating notes',
+    statusUpdating: 'Updating notes with the new settings.',
+    statusUpdated: 'Notes updated with the new settings.',
+    errReanalyze: 'Could not recompute notes with the new settings. Showing the previous result.',
+    statusUpdateFail: 'Could not update notes.',
+    stageModel: 'Downloading model',
+    stagePrepare: 'Preparing model',
+    stageRecognize: 'Recognizing notes',
+    errPrecise: 'Could not prepare precise notes. Showing the fast result — you can keep listening.',
+    statusPreciseFail: 'Precise result not ready. Fast result kept.',
+    errPlay: 'Could not start playback. Check the browser sound permission and try again.',
+    statusPlayFail: 'Could not start playback.',
+    errTooLarge: 'File is over 200 MB. Pick a smaller file.',
+    errTooLong: 'Recording is longer than 10 minutes. Pick a shorter file.',
+    errFormat: 'Format is not supported or the audio file is damaged.',
+    errModel: 'Could not prepare precise notes.',
+    errBackend: 'The browser could not continue recognition.',
+    errWorker: 'Recognition stopped unexpectedly.',
+    errInvalid: 'The recording is empty or unsuitable for recognition.',
+    errAnalysis: 'Recognition did not finish.',
+    errGeneric: 'Something went wrong. Try again.',
+    recovery: 'Choose another file',
+    fileActions: 'Audio file actions',
+    speed: 'Speed',
+    speedAria: 'Playback speed',
+    speedTitle: 'Playback speed — pitch is preserved',
+    settings: 'Settings',
+    sens: 'Sensitivity',
+    sensAria: 'Analysis sensitivity',
+    sensTitle: 'Higher — more notes, lower — stricter selection',
+    minDur: 'Min. note duration',
+    minDurAria: 'Minimum note duration',
+    maxNotes: 'Max simultaneous notes',
+    maxNotesAria: 'Maximum simultaneous notes',
+    contrast: 'Note contrast',
+    contrastAria: 'Note contrast — affects display only',
+    settingsHint: 'Applied to fast analysis — notes are recomputed automatically.',
+    theme: 'Theme',
+    tAuto: 'Auto',
+    tLight: 'Light',
+    tDark: 'Dark',
+    lang: 'Language',
+    recMode: 'Recognition mode',
+    fast: 'Fast',
+    precise: 'Precise',
+    preciseHint: 'The first precise analysis downloads the MuScriptor model — about 110 MB, cached afterwards.',
+    midiAria: 'Download MIDI',
+    midiTitle: 'Download the precise analysis result as a MIDI file',
+    replace: 'New file',
+    play: 'Play',
+    pause: 'Pause',
+    spaceKey: 'Space',
+    timelineAria: 'Playback position',
+    stageAria: 'Score navigation',
+    stageToolbarAria: 'Score scale and range',
+    zoomOut: 'Decrease time scale',
+    zoomIn: 'Increase time scale',
+    pitchRange: 'Range',
+    pitchRangeAria: 'Change the visible key range',
+    follow: 'Follow',
+    toPosition: 'Follow',
+    followOn: 'Follow enabled',
+    followOff: 'Resume following',
+    kbdAria: 'Keyboard shortcuts',
+    canvasAria: 'Falling score. Drag to browse, tap to seek, hold to hear a note. Arrow keys move the position by five seconds.',
+    hints: '<kbd>Space</kbd> play/pause&ensp;·&ensp;<kbd>←</kbd><kbd>→</kbd> ±5&thinsp;s&ensp;·&ensp;drag — pan&ensp;·&ensp;tap — seek&ensp;·&ensp;hold — note',
+    ms: 'ms',
+    clearCache: 'Clear cache',
+    clearCacheTitle: 'Delete the downloaded model and saved scores',
+    cacheCleared: 'Cache cleared',
+  },
+};
+
+type Lang = keyof typeof STRINGS;
+type Strings = Record<keyof (typeof STRINGS)['ru'], string>;
+type LangPref = 'auto' | Lang;
+type ThemePref = 'auto' | 'light' | 'dark';
+
+function storedPref<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  try {
+    const value = localStorage[key];
+    return allowed.includes(value as T) ? (value as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function systemPrefersRussian(): boolean {
+  const langs = navigator.languages?.length ? navigator.languages : [navigator.language];
+  return langs.some(l => l.toLowerCase().startsWith('ru'));
+}
+
+let langPref = storedPref<LangPref>('pianotape.lang', ['auto', 'ru', 'en'], 'auto');
+let lang: Lang = langPref === 'auto' ? (systemPrefersRussian() ? 'ru' : 'en') : langPref;
+let t: Strings = STRINGS[lang];
+let themePref = storedPref<ThemePref>('pianotape.theme', ['auto', 'light', 'dark'], 'auto');
+const prefersDark = matchMedia('(prefers-color-scheme: dark)');
+
+document.documentElement.lang = lang;
+applyDesignTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+
+function dec(text: string): string {
+  return lang === 'ru' ? text.replace('.', ',') : text;
+}
+
+function formatRate(value: number): string {
+  return `${dec(value.toFixed(1))}×`;
+}
+
+/* mark = the punched tape strip itself — holes use --surface so they
+   punch through to whatever card it sits on. */
+const MARK = `<svg viewBox="8.5 1 13 28" aria-hidden="true"><rect x="9" y="1.5" width="12" height="27" rx="3.5" fill="var(--accent)"/><g fill="var(--surface)"><circle cx="12.6" cy="7" r="1.7"/><circle cx="17.4" cy="11.6" r="1.7"/><circle cx="12.6" cy="16.2" r="1.7"/><circle cx="17.4" cy="20.8" r="1.7"/></g></svg>`;
+
 app.innerHTML = `
   <main class="application">
-    <header class="application__header">
-      <div class="application__brand" aria-label="pianorolltranscribe">
-        <span class="application__mark" aria-hidden="true"><span class="application__mark-keys"><i></i><i></i><i></i><i></i></span><span class="application__mark-note"></span></span>
-        <h1>pianorolltranscribe</h1>
-      </div>
-      <p class="application__privacy" title="Аудио декодируется и анализируется в браузере — ничего не отправляется">${ICONS.shieldCheck}<span>Локальная обработка</span></p>
-    </header>
     <section class="workspace" id="workspace" aria-busy="false">
       <p class="visually-hidden" id="status" role="status" aria-live="polite"></p>
       <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-controls="file-input" aria-describedby="drop-description">
         <input id="file-input" type="file" accept="audio/*" hidden>
-        <span class="drop-zone__motif" aria-hidden="true">
-          <svg viewBox="0 0 232 120" fill="none">
-            <rect x="1" y="1" width="230" height="118" rx="14" stroke="currentColor" opacity=".28"/>
-            <g opacity=".12" stroke="currentColor">
-              <path d="M32 8v104M64 8v104M96 8v104M128 8v104M160 8v104M192 8v104"/>
-            </g>
-            <g fill="currentColor">
-              <rect x="20" y="18" width="12" height="30" rx="6"/>
-              <rect x="40" y="12" width="12" height="44" rx="6" opacity=".75"/>
-              <rect x="60" y="30" width="12" height="24" rx="6"/>
-              <rect x="80" y="14" width="12" height="52" rx="6" opacity=".75"/>
-              <rect x="100" y="36" width="12" height="30" rx="6"/>
-              <rect x="120" y="16" width="12" height="42" rx="6" opacity=".75"/>
-              <rect x="140" y="44" width="12" height="20" rx="6"/>
-              <rect x="160" y="20" width="12" height="48" rx="6" opacity=".75"/>
-              <rect x="180" y="34" width="12" height="30" rx="6"/>
-              <rect x="200" y="14" width="12" height="50" rx="6" opacity=".75"/>
-            </g>
-            <rect x="10" y="92" width="212" height="3" rx="1.5" style="fill: var(--playback);"/>
-          </svg>
-        </span>
         <div class="drop-zone__copy">
-          <strong id="drop-title">Открыть аудиодорожку</strong>
-          <span id="drop-description">Перетащите файл или выберите с устройства — ноты появятся на падающей ленте над клавиатурой</span>
-          <span class="drop-zone__meta">MP3 · WAV · M4A&ensp;·&ensp;до 200 МБ&ensp;·&ensp;до 10 минут&ensp;·&ensp;файл не покидает устройство</span>
+          <span class="brand-line"><span class="app-mark" aria-hidden="true">${MARK}</span><span class="wordmark">pianotape</span></span>
+          <strong id="drop-title">${t.dropH}</strong>
+          <span class="drop-zone__meta" id="drop-description">${t.dropMeta}</span>
         </div>
-        <span class="drop-zone__cta">${ICONS.upload}Выбрать файл</span>
+        <span class="drop-zone__cta">${ICONS.upload}<span data-i18n="cta">${t.cta}</span></span>
         <span class="drop-zone__progress" aria-hidden="true"><i></i></span>
       </div>
       <div class="error-message" id="error-message" role="alert" hidden>
         ${ICONS.circleAlert}
         <span id="error-text"></span>
-        <button class="button button--secondary" id="recovery-button" type="button">Выбрать другой файл</button>
+        <button class="button button--secondary" id="recovery-button" type="button" data-i18n="recovery">${t.recovery}</button>
       </div>
       <section class="player" id="player" hidden>
         <div class="player__deck">
-          <div class="player__toolbar" aria-label="Действия с аудиофайлом">
+          <div class="player__toolbar" data-i18n-aria="fileActions" aria-label="${t.fileActions}">
             <div class="player__file">
-              <span class="player__file-icon" aria-hidden="true">${ICONS.fileMusic}</span>
+              <span class="app-mark app-mark--sm" aria-hidden="true">${MARK}</span>
+              <span class="wordmark">pianotape</span>
+              <i class="dot" aria-hidden="true">·</i>
               <strong id="file-name"></strong>
             </div>
             <div class="player__actions">
               <span class="player__analysis-status" id="analysis-status" aria-live="polite"></span>
-              <label class="control-chip" for="playback-rate">
-                <span class="control-chip__label">Скорость</span>
-                <span class="control-chip__select">
-                  <select id="playback-rate" aria-label="Скорость воспроизведения" title="Скорость воспроизведения — высота звука сохраняется">
-                    <option value="0.2">0,2×</option>
-                    <option value="0.3">0,3×</option>
-                    <option value="0.4">0,4×</option>
-                    <option value="0.5">0,5×</option>
-                    <option value="0.6">0,6×</option>
-                    <option value="0.7">0,7×</option>
-                    <option value="0.8">0,8×</option>
-                    <option value="0.9">0,9×</option>
-                    <option value="1" selected>1×</option>
-                  </select>
-                  ${ICONS.chevronDown}
-                </span>
+              <label class="control-chip control-chip--range">
+                <span class="control-chip__label" data-i18n="speed">${t.speed}</span>
+                <input id="playback-rate" type="range" min="0.2" max="1" step="0.1" value="1" data-i18n-aria="speedAria" aria-label="${t.speedAria}" title="${t.speedTitle}" data-i18n-title="speedTitle">
+                <output class="control-chip__value" id="playback-rate-value" for="playback-rate">${formatRate(1)}</output>
               </label>
-              <label class="control-chip control-chip--range" for="sensitivity">
-                <span class="control-chip__label">Чувствительность</span>
-                <input id="sensitivity" type="range" min="0" max="1" value="0.5" step="0.05" aria-label="Чувствительность анализа" aria-valuetext="Чувствительность: 50%" title="Выше — больше нот, ниже — строже отбор">
-                <output class="control-chip__value" id="sensitivity-value" for="sensitivity">50%</output>
-              </label>
+              <div class="recognition-mode" id="recognition-mode" role="radiogroup" data-i18n-aria="recMode" aria-label="${t.recMode}" hidden>
+                <button class="button recognition-mode__option recognition-mode__option--selected" id="instant-mode-button" type="button" role="radio" aria-checked="true" tabindex="0" data-i18n="fast">${t.fast}</button>
+                <button class="button recognition-mode__option" id="precise-mode-button" type="button" role="radio" aria-checked="false" tabindex="-1" data-i18n="precise">${t.precise}</button>
+              </div>
+              <button class="button button--neutral" id="midi-download-button" type="button" data-i18n-aria="midiAria" aria-label="${t.midiAria}" title="${t.midiTitle}" data-i18n-title="midiTitle" hidden>${ICONS.download}<span class="button__label">MIDI</span></button>
+              <button class="button button--neutral button--icon" id="replace-button" type="button" data-i18n-aria="replace" aria-label="${t.replace}" title="${t.replace}" data-i18n-title="replace">${ICONS.refreshCw}</button>
               <div class="analysis-settings" id="analysis-settings">
-                <button class="button button--neutral" id="settings-toggle" type="button" aria-expanded="false" aria-controls="analysis-settings-panel" aria-label="Настройки анализа" title="Настройки анализа">${ICONS.slidersHorizontal}<span class="button__label">Настройки</span></button>
-                <div class="analysis-settings__panel" id="analysis-settings-panel" role="group" aria-label="Настройки анализа" hidden>
-                  <label class="control-chip control-chip--range" for="min-note-ms">
-                    <span class="control-chip__label">Мин. длительность ноты</span>
-                    <input id="min-note-ms" type="range" min="50" max="500" value="150" step="10" aria-label="Минимальная длительность ноты" aria-valuetext="Минимальная длительность: 150 мс">
-                    <output class="control-chip__value" id="min-note-ms-value" for="min-note-ms">150 мс</output>
+                <button class="button button--neutral button--icon" id="settings-toggle" type="button" aria-expanded="false" aria-controls="analysis-settings-panel" data-i18n-aria="settings" aria-label="${t.settings}" title="${t.settings}" data-i18n-title="settings">${ICONS.settings}</button>
+                <div class="analysis-settings__panel" id="analysis-settings-panel" role="group" aria-label="${t.settings}" data-i18n-aria="settings" hidden>
+                  <label class="control-chip control-chip--range">
+                    <span class="control-chip__label" data-i18n="sens">${t.sens}</span>
+                    <input id="sensitivity" type="range" min="0" max="1" value="0.5" step="0.05" data-i18n-aria="sensAria" aria-label="${t.sensAria}" title="${t.sensTitle}" data-i18n-title="sensTitle">
+                    <output class="control-chip__value" id="sensitivity-value" for="sensitivity">50%</output>
                   </label>
-                  <label class="control-chip control-chip--range" for="max-notes">
-                    <span class="control-chip__label">Макс. нот одновременно</span>
-                    <input id="max-notes" type="range" min="1" max="8" value="8" step="1" aria-label="Максимум нот одновременно" aria-valuetext="Максимум одновременно: 8">
+                  <label class="control-chip control-chip--range">
+                    <span class="control-chip__label" data-i18n="minDur">${t.minDur}</span>
+                    <input id="min-note-ms" type="range" min="50" max="500" value="150" step="10" data-i18n-aria="minDurAria" aria-label="${t.minDurAria}">
+                    <output class="control-chip__value" id="min-note-ms-value" for="min-note-ms">150 ${t.ms}</output>
+                  </label>
+                  <label class="control-chip control-chip--range">
+                    <span class="control-chip__label" data-i18n="maxNotes">${t.maxNotes}</span>
+                    <input id="max-notes" type="range" min="1" max="8" value="8" step="1" data-i18n-aria="maxNotesAria" aria-label="${t.maxNotesAria}">
                     <output class="control-chip__value" id="max-notes-value" for="max-notes">8</output>
                   </label>
-                  <label class="control-chip control-chip--range" for="contrast">
-                    <span class="control-chip__label">Контраст нот</span>
-                    <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" aria-label="Контраст нот — влияет только на отображение" aria-valuetext="Контраст: 1,4">
-                    <output class="control-chip__value" id="contrast-value" for="contrast">1,4×</output>
+                  <label class="control-chip control-chip--range">
+                    <span class="control-chip__label" data-i18n="contrast">${t.contrast}</span>
+                    <input id="contrast" type="range" min="0.7" max="2.2" value="1.4" step="0.05" data-i18n-aria="contrastAria" aria-label="${t.contrastAria}">
+                    <output class="control-chip__value" id="contrast-value" for="contrast">${dec('1.4')}×</output>
                   </label>
-                  <p class="analysis-settings__hint">Применяются к быстрому анализу — ноты пересчитываются автоматически.</p>
+                  <div class="seg"><span data-i18n="theme">${t.theme}</span>
+                    <span class="seg__opts" id="theme-seg">
+                      <button type="button" data-theme-opt="auto" data-i18n="tAuto">${t.tAuto}</button>
+                      <button type="button" data-theme-opt="light" data-i18n="tLight">${t.tLight}</button>
+                      <button type="button" data-theme-opt="dark" data-i18n="tDark">${t.tDark}</button>
+                    </span>
+                  </div>
+                  <div class="seg"><span data-i18n="lang">${t.lang}</span>
+                    <span class="seg__opts" id="lang-seg">
+                      <button type="button" data-lang-opt="auto">Auto</button>
+                      <button type="button" data-lang-opt="ru">Рус</button>
+                      <button type="button" data-lang-opt="en">Eng</button>
+                    </span>
+                  </div>
+                  <p class="analysis-settings__hint" data-i18n="settingsHint">${t.settingsHint}</p>
+                  <button class="button button--neutral" id="clear-cache-button" type="button" data-i18n-aria="clearCacheTitle" aria-label="${t.clearCacheTitle}" title="${t.clearCacheTitle}" data-i18n-title="clearCacheTitle">${ICONS.trash2}<span data-i18n="clearCache">${t.clearCache}</span></button>
                 </div>
               </div>
-              <div class="recognition-mode" id="recognition-mode" role="radiogroup" aria-label="Режим распознавания" hidden>
-                <button class="button recognition-mode__option recognition-mode__option--selected" id="instant-mode-button" type="button" role="radio" aria-checked="true" tabindex="0">Быстро</button>
-                <button class="button recognition-mode__option" id="precise-mode-button" type="button" role="radio" aria-checked="false" tabindex="-1">Точнее</button>
-                <p class="recognition-help" id="recognition-mode-hint"></p>
-              </div>
-              <button class="button button--neutral" id="midi-download-button" type="button" aria-label="Скачать MIDI" title="Скачать результат точного анализа как MIDI-файл" hidden>${ICONS.download}<span class="button__label">MIDI</span></button>
-              <button class="button button--neutral" id="replace-button" type="button" aria-label="Заменить файл" title="Заменить файл">${ICONS.replace}<span class="button__label">Заменить файл</span></button>
             </div>
           </div>
           <div class="player__controls">
-            <button class="play-button" id="play-button" type="button" aria-label="Воспроизвести" title="Воспроизвести (Пробел)">${ICONS.play}</button>
-            <span class="player__time" id="current-time">0:00</span>
+            <button class="play-button" id="play-button" type="button" aria-label="${t.play}" title="${t.play} (${t.spaceKey})">${ICONS.play}</button>
+            <span class="player__time"><span id="current-time">0:00</span><span class="player__time--duration" id="duration-time">/ 0:00</span></span>
             <div class="waveform-timeline">
               <canvas id="waveform" aria-hidden="true"></canvas>
-              <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" aria-label="Позиция воспроизведения">
+              <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" data-i18n-aria="timelineAria" aria-label="${t.timelineAria}">
             </div>
-            <span class="player__time player__time--duration" id="duration-time">0:00</span>
           </div>
         </div>
-        <section class="piano-stage" data-following="true" aria-label="Навигация по партитуре">
-          <div class="piano-stage__toolbar" role="toolbar" aria-label="Масштаб и диапазон партитуры">
-            <button class="piano-stage__button" id="zoom-out-button" type="button" aria-label="Уменьшить временной масштаб" title="Уменьшить временной масштаб">${ICONS.minus}</button>
-            <button class="piano-stage__button" id="zoom-in-button" type="button" aria-label="Увеличить временной масштаб" title="Увеличить временной масштаб">${ICONS.plus}</button>
-            <button class="piano-stage__button piano-stage__button--wide" id="pitch-range-button" type="button" aria-label="Изменить видимый диапазон клавиш" title="Изменить видимый диапазон клавиш">${ICONS.piano}<span>Диапазон</span></button>
-            <button class="piano-stage__button piano-stage__button--wide" id="follow-button" type="button" aria-label="Следование включено" aria-pressed="true" title="Следование включено">${ICONS.locateFixed}<span>Следование</span></button>
+        <section class="piano-stage" data-following="true" data-i18n-aria="stageAria" aria-label="${t.stageAria}">
+          <div class="piano-stage__toolbar" role="toolbar" data-i18n-aria="stageToolbarAria" aria-label="${t.stageToolbarAria}">
+            <button class="piano-stage__button" id="zoom-out-button" type="button" data-i18n-aria="zoomOut" aria-label="${t.zoomOut}" title="${t.zoomOut}" data-i18n-title="zoomOut">${ICONS.minus}</button>
+            <button class="piano-stage__button" id="zoom-in-button" type="button" data-i18n-aria="zoomIn" aria-label="${t.zoomIn}" title="${t.zoomIn}" data-i18n-title="zoomIn">${ICONS.plus}</button>
+            <button class="piano-stage__button piano-stage__button--wide" id="pitch-range-button" type="button" data-i18n-aria="pitchRangeAria" aria-label="${t.pitchRangeAria}" title="${t.pitchRangeAria}" data-i18n-title="pitchRangeAria">${ICONS.piano}<span data-i18n="pitchRange">${t.pitchRange}</span></button>
+            <button class="piano-stage__button piano-stage__button--wide" id="follow-button" type="button" aria-label="${t.followOn}" aria-pressed="true" title="${t.followOn}">${ICONS.locateFixed}<span data-i18n="follow">${t.follow}</span></button>
+            <button class="piano-stage__button" id="hints-button" type="button" aria-expanded="false" aria-controls="stage-hints" data-i18n-aria="kbdAria" aria-label="${t.kbdAria}" title="${t.kbdAria}" data-i18n-title="kbdAria">${ICONS.keyboard}</button>
+            <div class="stage-hints" id="stage-hints" hidden><span id="stage-hints-list">${t.hints}</span></div>
           </div>
-          <canvas id="piano-roll" tabindex="0" aria-label="Падающая партитура. Перетаскивайте для обзора, нажимайте для перехода к позиции и удерживайте, чтобы услышать ноту. Стрелки перемещают позицию на пять секунд." aria-describedby="player-rail"></canvas>
+          <canvas id="piano-roll" tabindex="0" data-i18n-aria="canvasAria" aria-label="${t.canvasAria}" aria-describedby="stage-hints"></canvas>
         </section>
-        <div class="player__rail" id="player-rail">
-          <span class="player__rail-hints"><kbd>Space</kbd> пауза&ensp;·&ensp;<kbd>←</kbd><kbd>→</kbd> ±5&thinsp;с&ensp;·&ensp;перетащить — обзор&ensp;·&ensp;нажать — позиция&ensp;·&ensp;удерживать — нота</span>
-          <span class="player__rail-duration" id="rail-duration">0:00</span>
-        </div>
       </section>
     </section>
+    <div class="notice" id="notice" role="status" hidden></div>
   </main>
 `;
 
@@ -176,10 +379,12 @@ const elements = {
   recognitionMode: requiredElement<HTMLElement>('recognition-mode'),
   instantModeButton: requiredElement<HTMLButtonElement>('instant-mode-button'),
   preciseModeButton: requiredElement<HTMLButtonElement>('precise-mode-button'),
-  recognitionModeHint: requiredElement<HTMLElement>('recognition-mode-hint'),
   midiDownloadButton: requiredElement<HTMLButtonElement>('midi-download-button'),
   replaceButton: requiredElement<HTMLButtonElement>('replace-button'),
-  playbackRate: requiredElement<HTMLSelectElement>('playback-rate'),
+  clearCacheButton: requiredElement<HTMLButtonElement>('clear-cache-button'),
+  notice: requiredElement<HTMLElement>('notice'),
+  playbackRate: requiredElement<HTMLInputElement>('playback-rate'),
+  playbackRateValue: requiredElement<HTMLOutputElement>('playback-rate-value'),
   sensitivity: requiredElement<HTMLInputElement>('sensitivity'),
   sensitivityValue: requiredElement<HTMLOutputElement>('sensitivity-value'),
   analysisSettings: requiredElement<HTMLElement>('analysis-settings'),
@@ -191,6 +396,11 @@ const elements = {
   maxNotesValue: requiredElement<HTMLOutputElement>('max-notes-value'),
   contrast: requiredElement<HTMLInputElement>('contrast'),
   contrastValue: requiredElement<HTMLOutputElement>('contrast-value'),
+  themeSeg: requiredElement<HTMLElement>('theme-seg'),
+  langSeg: requiredElement<HTMLElement>('lang-seg'),
+  hintsButton: requiredElement<HTMLButtonElement>('hints-button'),
+  hintsPanel: requiredElement<HTMLElement>('stage-hints'),
+  hintsList: requiredElement<HTMLElement>('stage-hints-list'),
   zoomOutButton: requiredElement<HTMLButtonElement>('zoom-out-button'),
   zoomInButton: requiredElement<HTMLButtonElement>('zoom-in-button'),
   pitchRangeButton: requiredElement<HTMLButtonElement>('pitch-range-button'),
@@ -204,14 +414,14 @@ const elements = {
   timeline: requiredElement<HTMLInputElement>('timeline'),
   currentTime: requiredElement<HTMLElement>('current-time'),
   durationTime: requiredElement<HTMLElement>('duration-time'),
-  railDuration: requiredElement<HTMLElement>('rail-duration'),
 };
 
-const analysisClient = new AnalysisClient();
 const muscriptorClient = new AnalysisClient(
   () => new Worker(new URL('./muscriptor-worker.ts', import.meta.url), { type: 'module' }),
 );
-const fastSpectrumClient = new FastSpectrumClient();
+const fastSpectrumClient = new AnalysisClient(
+  () => new Worker(new URL('./fast-spectrum-worker.ts', import.meta.url), { type: 'module' }),
+);
 const audioPlayer = new AudioPlayer();
 const pianoAudition = new PianoAudition();
 const renderer = new PianoRollRenderer(elements.canvas);
@@ -220,7 +430,6 @@ let phase = AnalysisPhase.Idle;
 let analysisGeneration = 0;
 let animationFrameId: number | null = null;
 let scrubbing = false;
-let disposed = false;
 let decodedSamples: Float32Array | null = null;
 let currentFileHash: string | null = null;
 let fullFastSpectrumReady = false;
@@ -229,8 +438,6 @@ let fastAnalysisResult: AnalysisResult | null = null;
 let preciseAnalysisResult: AnalysisResult | null = null;
 let preciseAnalysisInProgress = false;
 let preciseAnalysisProgress = 0;
-let preciseModelReadyOnDevice = readPreciseModelReadyHint();
-let muscriptorUnavailable = false;
 let incrementalNotes: AnalyzedNote[] = [];
 let refinedUpToSeconds = 0;
 let partialFrameTimestamps: Float32Array | null = null;
@@ -243,15 +450,12 @@ let fastReanalyzePending = false;
 let reanalyzeTimer: number | null = null;
 
 audioPlayer.onStateChange = () => {
-  if (disposed) {
-    return;
-  }
   updatePlaybackUi();
   requestAnimation();
 };
 
 renderer.onSeek = seconds => {
-  if (disposed || !isPlaybackReady()) {
+  if (!isPlaybackReady()) {
     return;
   }
   audioPlayer.seek(seconds);
@@ -259,19 +463,13 @@ renderer.onSeek = seconds => {
   requestAnimation();
 };
 renderer.onFollowChange = following => {
-  if (!disposed) {
-    updateFollowUi(following);
-  }
+  updateFollowUi(following);
 };
 renderer.onPianoKeyPrepare = () => {
-  if (!disposed) {
-    pianoAudition.prepare();
-  }
+  pianoAudition.prepare();
 };
 renderer.onPianoKeyStart = midi => {
-  if (!disposed) {
-    pianoAudition.start(midi);
-  }
+  pianoAudition.start(midi);
 };
 renderer.onPianoKeyStop = () => {
   pianoAudition.stop();
@@ -286,23 +484,15 @@ elements.fileInput.addEventListener('change', () => {
 });
 
 elements.dropZone.addEventListener('click', () => {
-  if (!disposed) {
-    elements.fileInput.click();
-  }
+  elements.fileInput.click();
 });
 elements.dropZone.addEventListener('keydown', event => {
-  if (disposed) {
-    return;
-  }
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault();
     elements.fileInput.click();
   }
 });
 elements.dropZone.addEventListener('dragover', event => {
-  if (disposed) {
-    return;
-  }
   event.preventDefault();
   elements.dropZone.classList.add('drop-zone--dragging');
 });
@@ -312,9 +502,6 @@ elements.dropZone.addEventListener('dragleave', () => {
 elements.dropZone.addEventListener('drop', event => {
   event.preventDefault();
   elements.dropZone.classList.remove('drop-zone--dragging');
-  if (disposed) {
-    return;
-  }
   const [file] = event.dataTransfer?.files ?? [];
   if (file !== undefined) {
     void loadFile(file);
@@ -322,7 +509,7 @@ elements.dropZone.addEventListener('drop', event => {
 });
 
 elements.playButton.addEventListener('click', () => {
-  if (disposed || !isPlaybackReady()) {
+  if (!isPlaybackReady()) {
     return;
   }
   if (audioPlayer.isPlaying) {
@@ -334,7 +521,6 @@ elements.playButton.addEventListener('click', () => {
 
 document.addEventListener('keydown', event => {
   if (
-    disposed ||
     event.key !== ' ' ||
     event.repeat ||
     !isPlaybackReady() ||
@@ -351,14 +537,14 @@ document.addEventListener('keydown', event => {
 });
 
 elements.timeline.addEventListener('pointerdown', () => {
-  if (disposed || !isPlaybackReady()) {
+  if (!isPlaybackReady()) {
     return;
   }
   scrubbing = true;
   requestAnimation();
 });
 elements.timeline.addEventListener('input', () => {
-  if (disposed || !isPlaybackReady()) {
+  if (!isPlaybackReady()) {
     return;
   }
   audioPlayer.seek(Number(elements.timeline.value));
@@ -373,7 +559,7 @@ for (const eventName of ['pointerup', 'pointercancel', 'change']) {
 }
 
 elements.timeline.addEventListener('keydown', event => {
-  if (disposed || !isPlaybackReady()) {
+  if (!isPlaybackReady()) {
     return;
   }
   const seekOffset = event.key === 'ArrowLeft' ? -5 : event.key === 'ArrowRight' ? 5 : null;
@@ -381,9 +567,7 @@ elements.timeline.addEventListener('keydown', event => {
     return;
   }
   event.preventDefault();
-  audioPlayer.seek(audioPlayer.currentTimeSeconds + seekOffset);
-  updatePlaybackUi();
-  requestAnimation();
+  seekBy(seekOffset);
 });
 
 let playbackRatePointerActive = false;
@@ -391,46 +575,186 @@ restorePlaybackRate();
 elements.playbackRate.addEventListener('pointerdown', () => {
   playbackRatePointerActive = true;
 });
-elements.playbackRate.addEventListener('change', () => {
-  audioPlayer.setPlaybackRate(Number(elements.playbackRate.value));
+elements.playbackRate.addEventListener('input', () => {
+  const rate = Number(elements.playbackRate.value);
+  audioPlayer.setPlaybackRate(rate);
+  syncOutput(elements.playbackRate, elements.playbackRateValue, t.speed, formatRate(rate));
   persistPlaybackRate();
+});
+elements.playbackRate.addEventListener('change', () => {
   if (playbackRatePointerActive) {
     elements.playbackRate.blur();
   }
   playbackRatePointerActive = false;
 });
 
-elements.canvas.addEventListener('keydown', event => {
-  if (disposed || !isPlaybackReady()) {
+/* ── Theme & language ─────────────────────────────────── */
+
+function resolvedTheme(): 'light' | 'dark' {
+  return themePref === 'auto' ? (prefersDark.matches ? 'dark' : 'light') : themePref;
+}
+
+function applyTheme(): void {
+  const resolved = resolvedTheme();
+  document.documentElement.dataset.theme = resolved;
+  applyDesignTheme(resolved);
+  elements.themeSeg.querySelectorAll('button').forEach(button => {
+    button.classList.toggle('on', button.dataset.themeOpt === themePref);
+  });
+  renderer.render(audioPlayer.currentTimeSeconds);
+  waveformTimeline.setCurrentTime(audioPlayer.currentTimeSeconds);
+}
+
+function applyLanguage(): void {
+  t = STRINGS[lang];
+  document.documentElement.lang = lang;
+  document.querySelectorAll<HTMLElement>('[data-i18n]').forEach(el => {
+    el.textContent = t[el.dataset.i18n as keyof Strings];
+  });
+  document.querySelectorAll<HTMLElement>('[data-i18n-aria]').forEach(el => {
+    el.setAttribute('aria-label', t[el.dataset.i18nAria as keyof Strings]);
+  });
+  document.querySelectorAll<HTMLElement>('[data-i18n-title]').forEach(el => {
+    el.title = t[el.dataset.i18nTitle as keyof Strings];
+  });
+  elements.hintsList.innerHTML = t.hints;
+  elements.langSeg.querySelectorAll('button').forEach(button => {
+    button.classList.toggle('on', button.dataset.langOpt === langPref);
+  });
+  refreshSettingOutputs();
+  updateRecognitionModeUi();
+  updateFollowUi(elements.pianoStage.dataset.following === 'true');
+  playIconPlaying = null;
+  setPhase(phase, phaseProgress, phaseLabel);
+  updatePlaybackUi();
+}
+
+function syncOutput(
+  input: HTMLInputElement,
+  output: HTMLOutputElement,
+  label: string,
+  text: string,
+): void {
+  output.value = text;
+  output.textContent = text;
+  input.setAttribute('aria-valuetext', `${label}: ${text}`);
+}
+
+function refreshSettingOutputs(): void {
+  syncOutput(elements.playbackRate, elements.playbackRateValue, t.speed, formatRate(Number(elements.playbackRate.value)));
+  syncOutput(elements.sensitivity, elements.sensitivityValue, t.sens, formatSensitivity(analysisSensitivity));
+  syncOutput(elements.minNoteMs, elements.minNoteMsValue, t.minDur, `${analysisMinNoteMs} ${t.ms}`);
+  syncOutput(elements.maxNotes, elements.maxNotesValue, t.maxNotes, String(analysisMaxNotesPerFrame));
+  syncOutput(elements.contrast, elements.contrastValue, t.contrast, formatContrast(Number(elements.contrast.value)));
+}
+
+elements.themeSeg.addEventListener('click', event => {
+  const button = (event.target as Element).closest<HTMLButtonElement>('[data-theme-opt]');
+  if (button === null) {
     return;
   }
-  const seekOffset = event.key === 'ArrowLeft' ? -5 : event.key === 'ArrowRight' ? 5 : null;
-  if (seekOffset !== null) {
+  themePref = button.dataset.themeOpt as ThemePref;
+  try {
+    localStorage['pianotape.theme'] = themePref;
+  } catch { /* private mode */ }
+  applyTheme();
+});
+
+elements.langSeg.addEventListener('click', event => {
+  const button = (event.target as Element).closest<HTMLButtonElement>('[data-lang-opt]');
+  if (button === null) {
+    return;
+  }
+  langPref = button.dataset.langOpt as LangPref;
+  lang = langPref === 'auto' ? (systemPrefersRussian() ? 'ru' : 'en') : langPref;
+  try {
+    localStorage['pianotape.lang'] = langPref;
+  } catch { /* private mode */ }
+  applyLanguage();
+});
+
+prefersDark.addEventListener('change', () => {
+  if (themePref === 'auto') {
+    applyTheme();
+  }
+});
+
+/* ── Notice toast + cache clearing ────────────────────── */
+
+let noticeTimer = 0;
+
+function showNotice(text: string): void {
+  elements.notice.textContent = text;
+  elements.notice.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => {
+    elements.notice.hidden = true;
+  }, 8000);
+}
+
+elements.notice.addEventListener('click', () => {
+  elements.notice.hidden = true;
+  clearTimeout(noticeTimer);
+});
+
+// One-time heads-up about the ~110 MB precise-model download.
+function maybeShowModelNotice(): void {
+  try {
+    if (localStorage['pianotape.model-notice'] === '1') {
+      return;
+    }
+    localStorage['pianotape.model-notice'] = '1';
+  } catch { /* private mode — show anyway, session-scoped */ }
+  showNotice(t.preciseHint);
+}
+
+elements.clearCacheButton.addEventListener('click', () => {
+  clearPreciseCache();
+  if ('caches' in window) {
+    void Promise.all(['muscriptor-gguf-v2', 'muscriptor-gguf-v1'].map(name => caches.delete(name)))
+      .catch(() => undefined);
+  }
+  updateRecognitionModeUi();
+  showNotice(t.cacheCleared);
+});
+
+/* ── Keyboard hints popover ───────────────────────────── */
+
+function setHintsOpen(open: boolean): void {
+  elements.hintsPanel.hidden = !open;
+  elements.hintsButton.setAttribute('aria-expanded', String(open));
+}
+
+elements.hintsButton.addEventListener('click', () => {
+  setHintsOpen(elements.hintsPanel.hidden);
+});
+
+elements.canvas.addEventListener('keydown', event => {
+  if (!isPlaybackReady()) {
+    return;
+  }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
     event.preventDefault();
-    audioPlayer.seek(audioPlayer.currentTimeSeconds + seekOffset);
+    seekBy(event.key === 'ArrowLeft' ? -5 : 5);
   } else if (event.key === 'Home') {
     event.preventDefault();
     audioPlayer.seek(0);
+    updatePlaybackUi();
+    requestAnimation();
   } else if (event.key === 'End') {
     event.preventDefault();
     audioPlayer.seek(audioPlayer.durationSeconds);
-  } else {
-    return;
+    updatePlaybackUi();
+    requestAnimation();
   }
-  updatePlaybackUi();
-  requestAnimation();
 });
 
 elements.recoveryButton.addEventListener('click', () => {
-  if (!disposed) {
-    elements.fileInput.click();
-  }
+  elements.fileInput.click();
 });
 
 elements.replaceButton.addEventListener('click', () => {
-  if (!disposed) {
-    elements.fileInput.click();
-  }
+  elements.fileInput.click();
 });
 
 elements.instantModeButton.addEventListener('click', () => {
@@ -464,30 +788,21 @@ restoreAnalysisSettings();
 
 elements.sensitivity.addEventListener('input', () => {
   analysisSensitivity = Number(elements.sensitivity.value);
-  const text = formatSensitivity(analysisSensitivity);
-  elements.sensitivityValue.value = text;
-  elements.sensitivityValue.textContent = text;
-  elements.sensitivity.setAttribute('aria-valuetext', `Чувствительность: ${text}`);
+  syncOutput(elements.sensitivity, elements.sensitivityValue, t.sens, formatSensitivity(analysisSensitivity));
   persistAnalysisSettings();
   queueFastReanalyze();
 });
 
 elements.minNoteMs.addEventListener('input', () => {
   analysisMinNoteMs = Number(elements.minNoteMs.value);
-  const text = `${analysisMinNoteMs} мс`;
-  elements.minNoteMsValue.value = text;
-  elements.minNoteMsValue.textContent = text;
-  elements.minNoteMs.setAttribute('aria-valuetext', `Минимальная длительность: ${text}`);
+  syncOutput(elements.minNoteMs, elements.minNoteMsValue, t.minDur, `${analysisMinNoteMs} ${t.ms}`);
   persistAnalysisSettings();
   queueFastReanalyze();
 });
 
 elements.maxNotes.addEventListener('input', () => {
   analysisMaxNotesPerFrame = Number(elements.maxNotes.value);
-  const text = String(analysisMaxNotesPerFrame);
-  elements.maxNotesValue.value = text;
-  elements.maxNotesValue.textContent = text;
-  elements.maxNotes.setAttribute('aria-valuetext', `Максимум одновременно: ${text}`);
+  syncOutput(elements.maxNotes, elements.maxNotesValue, t.maxNotes, String(analysisMaxNotesPerFrame));
   persistAnalysisSettings();
   queueFastReanalyze();
 });
@@ -495,64 +810,63 @@ elements.maxNotes.addEventListener('input', () => {
 elements.contrast.addEventListener('input', () => {
   const contrast = Number(elements.contrast.value);
   renderer.setContrast(contrast);
-  const text = formatContrast(contrast);
-  elements.contrastValue.value = text;
-  elements.contrastValue.textContent = text;
-  elements.contrast.setAttribute('aria-valuetext', `Контраст: ${text}`);
+  syncOutput(elements.contrast, elements.contrastValue, t.contrast, formatContrast(contrast));
   persistContrastSetting();
 });
 
 elements.settingsToggle.addEventListener('click', () => {
-  if (!disposed) {
-    setSettingsOpen(elements.settingsPanel.hidden);
-  }
+  setSettingsOpen(elements.settingsPanel.hidden);
 });
 
+// Outside pointer closes whichever popover is open.
 document.addEventListener('pointerdown', event => {
-  if (elements.settingsPanel.hidden) {
+  if (!(event.target instanceof Node)) {
     return;
   }
-  if (event.target instanceof Node && elements.analysisSettings.contains(event.target)) {
-    return;
+  if (
+    !elements.hintsPanel.hidden &&
+    !elements.hintsPanel.contains(event.target) &&
+    !elements.hintsButton.contains(event.target)
+  ) {
+    setHintsOpen(false);
   }
-  setSettingsOpen(false);
+  if (!elements.settingsPanel.hidden && !elements.analysisSettings.contains(event.target)) {
+    setSettingsOpen(false);
+  }
 });
 
 document.addEventListener('keydown', event => {
-  if (disposed || event.key !== 'Escape' || elements.settingsPanel.hidden) {
+  if (event.key !== 'Escape') {
     return;
   }
-  setSettingsOpen(false);
-  elements.settingsToggle.focus();
+  if (!elements.hintsPanel.hidden) {
+    setHintsOpen(false);
+    elements.hintsButton.focus();
+  } else if (!elements.settingsPanel.hidden) {
+    setSettingsOpen(false);
+    elements.settingsToggle.focus();
+  }
 });
 
 elements.zoomOutButton.addEventListener('click', () => {
-  if (!disposed) {
-    renderer.zoomTime(-1);
-  }
+  renderer.zoomTime(-1);
 });
 
 elements.zoomInButton.addEventListener('click', () => {
-  if (!disposed) {
-    renderer.zoomTime(1);
-  }
+  renderer.zoomTime(1);
 });
 
 elements.pitchRangeButton.addEventListener('click', () => {
-  if (!disposed) {
-    renderer.cyclePitchRange();
-  }
+  renderer.cyclePitchRange();
 });
 
 elements.followButton.addEventListener('click', () => {
-  if (!disposed) {
-    renderer.toggleFollow();
-  }
+  renderer.toggleFollow();
 });
 
 elements.midiDownloadButton.addEventListener('click', () => {
   const midiBytes = preciseAnalysisResult?.midiBytes;
-  if (disposed || midiBytes === undefined) {
+  if (midiBytes === undefined) {
     return;
   }
   const url = URL.createObjectURL(new Blob([midiBytes], { type: 'audio/midi' }));
@@ -564,25 +878,8 @@ elements.midiDownloadButton.addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
-window.addEventListener('beforeunload', () => {
-  disposed = true;
-  analysisGeneration += 1;
-  cancelAnimation();
-  analysisClient.dispose();
-  muscriptorClient.dispose();
-  fastSpectrumClient.dispose();
-  audioPlayer.dispose();
-  pianoAudition.dispose();
-  renderer.dispose();
-  waveformTimeline.dispose();
-});
-
 async function loadFile(file: File): Promise<void> {
-  if (disposed) {
-    return;
-  }
   const generation = ++analysisGeneration;
-  analysisClient.cancel();
   muscriptorClient.cancel();
   fastSpectrumClient.cancel();
   audioPlayer.reset();
@@ -601,7 +898,6 @@ async function loadFile(file: File): Promise<void> {
   preciseAnalysisResult = null;
   preciseAnalysisInProgress = false;
   preciseAnalysisProgress = 0;
-  muscriptorUnavailable = false;
   incrementalNotes = [];
   refinedUpToSeconds = 0;
   partialFrameTimestamps = null;
@@ -639,8 +935,10 @@ async function loadFile(file: File): Promise<void> {
     elements.dropZone.hidden = true;
     setPhase(AnalysisPhase.FastAnalyzing);
     fastAnalysisRunning = true;
+    // Slice: the client transfers the buffer to the worker — decodedSamples
+    // must stay attached for later re-analysis.
     const fastResult = await fastSpectrumClient.analyze(
-      decoded.samples,
+      decoded.samples.slice(),
       {
         onPreview: preview => {
           if (generation !== analysisGeneration) {
@@ -651,10 +949,9 @@ async function loadFile(file: File): Promise<void> {
           elements.timeline.max = String(decoded.durationSeconds);
           elements.timeline.value = '0';
           elements.durationTime.textContent = formatTime(decoded.durationSeconds);
-          elements.railDuration.textContent = formatTime(decoded.durationSeconds);
           elements.player.hidden = false;
           setPhase(AnalysisPhase.PreviewReady);
-          elements.status.textContent = 'Первые ноты готовы. Продолжаем подготовку.';
+          elements.status.textContent = t.statusPreview;
           updatePlaybackUi();
         },
       },
@@ -672,7 +969,6 @@ async function loadFile(file: File): Promise<void> {
     elements.timeline.max = String(decoded.durationSeconds);
     elements.timeline.value = '0';
     elements.durationTime.textContent = formatTime(decoded.durationSeconds);
-    elements.railDuration.textContent = formatTime(decoded.durationSeconds);
     elements.player.hidden = false;
     setPhase(AnalysisPhase.FastReady);
     updatePlaybackUi();
@@ -689,12 +985,12 @@ async function loadFile(file: File): Promise<void> {
     }
     if (isPlaybackReady() && hasFullFastSpectrum) {
       setPhase(AnalysisPhase.FastReady);
-      elements.status.textContent = 'Быстрый вариант готов. Точный вариант сейчас недоступен.';
+      elements.status.textContent = t.statusFastOnly;
       return;
     }
     if (isPlaybackReady() && hasFastPreview) {
       setPhase(AnalysisPhase.PreviewReady);
-      elements.status.textContent = 'Первые ноты готовы. Полная лента сейчас недоступна.';
+      elements.status.textContent = t.statusPreviewPartial;
       if (fastReanalyzePending) {
         fastReanalyzePending = false;
         queueFastReanalyze();
@@ -716,9 +1012,6 @@ function currentFastSpectrumOptions(): FastSpectrumOptions {
 }
 
 function queueFastReanalyze(): void {
-  if (disposed) {
-    return;
-  }
   // The initial analyze in loadFile owns the worker — never cancel it from
   // here; run after it settles instead (loadFile consumes the flag).
   if (decodedSamples !== null && fastAnalysisRunning) {
@@ -739,52 +1032,51 @@ function queueFastReanalyze(): void {
 
 async function reanalyzeFastSpectrum(): Promise<void> {
   const samples = decodedSamples;
-  if (disposed || samples === null || fastAnalysisRunning || !isPlaybackReady()) {
+  if (samples === null || fastAnalysisRunning || !isPlaybackReady()) {
     return;
   }
   const generation = analysisGeneration;
   fastSpectrumClient.cancel();
-  elements.analysisStatus.textContent = 'Обновляем ноты';
+  elements.analysisStatus.textContent = t.updatingNotes;
   elements.analysisStatus.removeAttribute('title');
   elements.analysisStatus.removeAttribute('aria-label');
   elements.analysisStatus.dataset.busy = 'true';
-  elements.status.textContent = 'Обновляем ноты с новыми настройками.';
+  elements.status.textContent = t.statusUpdating;
   try {
     const result = await fastSpectrumClient.analyze(
-      samples,
+      samples.slice(),
       {
         onPreview: preview => {
           if (
-            disposed ||
             generation !== analysisGeneration ||
             recognitionMode !== RecognitionMode.Instant
           ) {
             return;
           }
-          renderer.setAnalysisPreservingViewport(preview, audioPlayer.durationSeconds);
+          renderer.setAnalysis(preview, audioPlayer.durationSeconds, true);
         },
       },
       currentFastSpectrumOptions(),
     );
-    if (disposed || generation !== analysisGeneration) {
+    if (generation !== analysisGeneration) {
       return;
     }
     fastAnalysisResult = result;
     fullFastSpectrumReady = true;
     if (recognitionMode === RecognitionMode.Instant) {
-      renderer.setAnalysisPreservingViewport(result, audioPlayer.durationSeconds);
+      renderer.setAnalysis(result, audioPlayer.durationSeconds, true);
     }
     restoreReadyPhase();
-    elements.status.textContent = 'Ноты обновлены с новыми настройками.';
+    elements.status.textContent = t.statusUpdated;
     updatePlaybackUi();
   } catch (error) {
-    if (disposed || generation !== analysisGeneration || isCancelled(error)) {
+    if (generation !== analysisGeneration || isCancelled(error)) {
       return;
     }
     console.error('Пересчёт быстрого анализа не удался:', error);
     restoreReadyPhase();
-    showError('Не удалось пересчитать ноты с новыми настройками. Показан прежний вариант.');
-    elements.status.textContent = 'Не удалось обновить ноты.';
+    showError(t.errReanalyze);
+    elements.status.textContent = t.statusUpdateFail;
   }
 }
 
@@ -808,14 +1100,14 @@ function setSettingsOpen(open: boolean): void {
 }
 
 function selectRecognitionMode(nextMode: RecognitionMode): void {
-  if (disposed || !fullFastSpectrumReady || fastAnalysisResult === null) {
+  if (!fullFastSpectrumReady || fastAnalysisResult === null) {
     return;
   }
 
   recognitionMode = nextMode;
   if (nextMode === RecognitionMode.Instant) {
     renderer.setPreciseKeyHighlighting(false);
-    renderer.setAnalysisPreservingViewport(fastAnalysisResult, audioPlayer.durationSeconds);
+    renderer.setAnalysis(fastAnalysisResult, audioPlayer.durationSeconds, true);
     setPhase(AnalysisPhase.FastReady);
     updatePlaybackUi();
     return;
@@ -825,7 +1117,7 @@ function selectRecognitionMode(nextMode: RecognitionMode): void {
 
   if (preciseAnalysisResult !== null) {
     renderer.setPreciseKeyHighlighting(true);
-    renderer.setAnalysisPreservingViewport(preciseAnalysisResult, audioPlayer.durationSeconds);
+    renderer.setAnalysis(preciseAnalysisResult, audioPlayer.durationSeconds, true);
     setPhase(AnalysisPhase.Complete);
     updatePlaybackUi();
     return;
@@ -834,7 +1126,7 @@ function selectRecognitionMode(nextMode: RecognitionMode): void {
   if (preciseAnalysisInProgress) {
     const partial = buildPartialResult();
     if (partial !== null) {
-      renderer.setAnalysisPreservingViewport(partial, audioPlayer.durationSeconds);
+      renderer.setAnalysis(partial, audioPlayer.durationSeconds, true);
     }
     setPhase(AnalysisPhase.Refining, preciseAnalysisProgress);
     return;
@@ -846,7 +1138,6 @@ function selectRecognitionMode(nextMode: RecognitionMode): void {
 async function refineWithModel(): Promise<void> {
   const samples = decodedSamples;
   if (
-    disposed ||
     !fullFastSpectrumReady ||
     samples === null ||
     preciseAnalysisInProgress
@@ -855,6 +1146,7 @@ async function refineWithModel(): Promise<void> {
   }
 
   const generation = analysisGeneration;
+  maybeShowModelNotice();
   preciseAnalysisInProgress = true;
   preciseAnalysisProgress = 0;
   incrementalNotes = [];
@@ -865,23 +1157,22 @@ async function refineWithModel(): Promise<void> {
   setPhase(AnalysisPhase.Refining, 0);
   try {
     const result = await runPreciseAnalysis(samples, generation);
-    if (disposed || generation !== analysisGeneration) {
+    if (generation !== analysisGeneration) {
       return;
     }
     preciseAnalysisInProgress = false;
     preciseAnalysisResult = result;
     elements.midiDownloadButton.hidden = result.midiBytes === undefined;
-    persistPreciseModelReadyHint();
     if (recognitionMode === RecognitionMode.Precise) {
       renderer.setPreciseKeyHighlighting(true);
-      renderer.setAnalysisPreservingViewport(result, audioPlayer.durationSeconds);
+      renderer.setAnalysis(result, audioPlayer.durationSeconds, true);
       setPhase(AnalysisPhase.Complete);
     } else {
       setPhase(AnalysisPhase.FastReady);
     }
     updatePlaybackUi();
   } catch (error) {
-    if (disposed || generation !== analysisGeneration || isCancelled(error)) {
+    if (generation !== analysisGeneration || isCancelled(error)) {
       return;
     }
     console.error('Точный анализ не удался:', error);
@@ -889,11 +1180,11 @@ async function refineWithModel(): Promise<void> {
     recognitionMode = RecognitionMode.Instant;
     renderer.setPreciseKeyHighlighting(false);
     if (fastAnalysisResult !== null) {
-      renderer.setAnalysisPreservingViewport(fastAnalysisResult, audioPlayer.durationSeconds);
+      renderer.setAnalysis(fastAnalysisResult, audioPlayer.durationSeconds, true);
     }
     setPhase(AnalysisPhase.FastReady);
-    showError('Не удалось подготовить точные ноты. Показан быстрый вариант — можно продолжать слушать запись.');
-    elements.status.textContent = 'Точный вариант не готов. Быстрый вариант сохранён.';
+    showError(t.errPrecise);
+    elements.status.textContent = t.statusPreciseFail;
   }
 }
 
@@ -905,82 +1196,58 @@ async function runPreciseAnalysis(samples: Float32Array, generation: number): Pr
       return resultFromCache(cached);
     }
   }
-  if (!muscriptorUnavailable) {
-    try {
-      const result = await muscriptorClient.analyze(samples.slice(), {
-        onProgress: (progress, notes, stage, refinedSeconds) => {
-          if (generation !== analysisGeneration) {
-            return;
-          }
-          preciseAnalysisProgress = progress;
-          if (refinedSeconds !== undefined) {
-            refinedUpToSeconds = refinedSeconds;
-          }
-          if (notes !== undefined && notes.length > 0) {
-            pushIncrementalNotes(notes);
-          }
-          if (
-            recognitionMode === RecognitionMode.Precise &&
-            (refinedSeconds !== undefined || (notes !== undefined && notes.length > 0))
-          ) {
-            const partial = buildPartialResult();
-            if (partial !== null) {
-              renderer.setAnalysisPreservingViewport(partial, audioPlayer.durationSeconds);
-            }
-          }
-          if (recognitionMode !== RecognitionMode.Precise) {
-            return;
-          }
-          const stageLabel = stage === 'model'
-            ? 'Скачиваем модель'
-            : stage === 'prepare'
-              ? 'Готовим модель'
-              : 'Распознаём ноты';
-          setPhase(AnalysisPhase.Refining, progress, stageLabel);
-        },
-      });
-      if (fileHash !== null) {
-        cachePrecise(fileHash, {
-          durationSeconds: audioPlayer.durationSeconds,
-          notes: result.notes.map(note => ({
-            pitchMidi: note.pitchMidi,
-            amplitude: note.amplitude,
-            startTimeSeconds: note.startTimeSeconds,
-            endTimeSeconds: note.endTimeSeconds,
-            instrument: note.instrument,
-          })),
-          midiBase64: result.midiBytes !== undefined ? midiToBase64(result.midiBytes) : undefined,
-        });
-      }
-      return result;
-    } catch (error) {
-      // A failed run may leave the wasm instance aborted; recycle the worker
-      // so a retry starts from a clean module instead of a dead one.
-      muscriptorClient.cancel();
-      if (
-        error instanceof AnalysisClientError &&
-        (error.code === AnalysisErrorCode.BackendUnavailable ||
-          error.code === AnalysisErrorCode.ModelLoadFailed ||
-          error.code === AnalysisErrorCode.WorkerFailed)
-      ) {
-        console.error('MuScriptor недоступен, переключаюсь на быстрый движок:', error.message);
-        muscriptorUnavailable = true;
-      } else {
-        throw error;
-      }
-    }
-  }
-  return analysisClient.analyze(samples.slice(), {
-    onProgress: progress => {
-      if (generation === analysisGeneration) {
+  try {
+    const result = await muscriptorClient.analyze(samples.slice(), {
+      onProgress: (progress, notes, stage, refinedSeconds) => {
+        if (generation !== analysisGeneration) {
+          return;
+        }
         preciseAnalysisProgress = progress;
+        if (refinedSeconds !== undefined) {
+          refinedUpToSeconds = refinedSeconds;
+        }
+        if (notes !== undefined && notes.length > 0) {
+          pushIncrementalNotes(notes);
+        }
+        if (
+          recognitionMode === RecognitionMode.Precise &&
+          (refinedSeconds !== undefined || (notes !== undefined && notes.length > 0))
+        ) {
+          const partial = buildPartialResult();
+          if (partial !== null) {
+            renderer.setAnalysis(partial, audioPlayer.durationSeconds, true);
+          }
+        }
         if (recognitionMode !== RecognitionMode.Precise) {
           return;
         }
-        setPhase(AnalysisPhase.Refining, progress);
-      }
-    },
-  });
+        const stageLabel = stage === 'model'
+          ? t.stageModel
+          : stage === 'prepare'
+            ? t.stagePrepare
+            : t.stageRecognize;
+        setPhase(AnalysisPhase.Refining, progress, stageLabel);
+      },
+    });
+    if (fileHash !== null) {
+      cachePrecise(fileHash, {
+        durationSeconds: audioPlayer.durationSeconds,
+        notes: result.notes.map(note => ({
+          pitchMidi: note.pitchMidi,
+          amplitude: note.amplitude,
+          startTimeSeconds: note.startTimeSeconds,
+          endTimeSeconds: note.endTimeSeconds,
+          instrument: note.instrument,
+        })),
+        midiBase64: result.midiBytes !== undefined ? midiToBase64(result.midiBytes) : undefined,
+      });
+    }
+    return result;
+  } catch (error) {
+    // Упавший прогон может оставить wasm-инстанс мёртвым — следующий старт с чистого модуля.
+    muscriptorClient.cancel();
+    throw error;
+  }
 }
 
 const PARTIAL_FRAMES_PER_SECOND = 22050 / 256;
@@ -1012,33 +1279,32 @@ function paintPartialNote(
   }
 }
 
-function pushIncrementalNotes(notes: AnalyzedNote[]): void {
+function ensurePartialFrameBuffers(): Uint8Array | null {
   const durationSeconds = audioPlayer.durationSeconds;
   if (durationSeconds <= 0) {
-    return;
+    return null;
   }
   const frameCount = Math.max(1, Math.ceil(durationSeconds * PARTIAL_FRAMES_PER_SECOND));
-  let reallocated = false;
   if (partialFrameTimestamps === null || partialFrameTimestamps.length !== frameCount) {
     partialFrameTimestamps = new Float32Array(frameCount);
     for (let frame = 0; frame < frameCount; frame += 1) {
       partialFrameTimestamps[frame] = frame / PARTIAL_FRAMES_PER_SECOND;
     }
     partialFrameProbabilities = new Uint8Array(frameCount * PARTIAL_PITCH_COUNT);
-    reallocated = true;
+    return partialFrameProbabilities;
   }
-  const probabilities = partialFrameProbabilities;
-  if (probabilities === null) {
-    return;
-  }
-  const toMark = reallocated ? incrementalNotes.concat(notes) : notes;
-  for (const note of toMark) {
+  return partialFrameProbabilities;
+}
+
+function pushIncrementalNotes(notes: AnalyzedNote[]): void {
+  const frameCount = partialFrameTimestamps?.length ??
+    Math.max(1, Math.ceil(audioPlayer.durationSeconds * PARTIAL_FRAMES_PER_SECOND));
+  for (const note of notes) {
     note.startFrame = Math.max(0, Math.floor(note.startTimeSeconds * PARTIAL_FRAMES_PER_SECOND));
     note.endFrame = Math.min(
       frameCount,
       Math.max(note.startFrame + 1, Math.ceil(note.endTimeSeconds * PARTIAL_FRAMES_PER_SECOND)),
     );
-    paintPartialNote(probabilities, frameCount, note);
   }
   incrementalNotes.push(...notes);
 }
@@ -1093,13 +1359,16 @@ function resultFromCache(cached: CachedPrecise): AnalysisResult {
 }
 
 function buildPartialResult(): AnalysisResult | null {
-  if (partialFrameTimestamps === null || partialFrameProbabilities === null) {
+  const probabilities = ensurePartialFrameBuffers();
+  if (probabilities === null || partialFrameTimestamps === null) {
     return null;
   }
   const frameCount = partialFrameTimestamps.length;
-  const probabilities = partialFrameProbabilities;
   const fast = fastAnalysisResult;
   const notes = incrementalNotes.slice();
+  // Rebuild the grid from scratch each call — the fast fill above the
+  // boundary would otherwise stay painted in regions that were since refined.
+  probabilities.fill(0);
   if (fast !== null) {
     // Past the refined boundary the fast spectrum is still shown — resampled
     // onto the partial grid — so the view reads as refinement sweeping
@@ -1121,10 +1390,6 @@ function buildPartialResult(): AnalysisResult | null {
         frame * PARTIAL_PITCH_COUNT,
       );
     }
-    // Precise notes may extend past the boundary — repaint them on top.
-    for (const note of incrementalNotes) {
-      paintPartialNote(probabilities, frameCount, note);
-    }
     for (const note of fast.notes) {
       if (note.startTimeSeconds < refinedUpToSeconds) {
         continue;
@@ -1144,6 +1409,10 @@ function buildPartialResult(): AnalysisResult | null {
     }
     notes.sort((left, right) => left.startTimeSeconds - right.startTimeSeconds);
   }
+  // Precise notes may extend past the boundary — paint them on top.
+  for (const note of incrementalNotes) {
+    paintPartialNote(probabilities, frameCount, note);
+  }
   return {
     notes,
     frameCount,
@@ -1158,25 +1427,28 @@ async function startPlayback(): Promise<void> {
   clearError();
   try {
     await audioPlayer.play();
-    if (disposed || generation !== analysisGeneration) {
+    if (generation !== analysisGeneration) {
       return;
     }
     updatePlaybackUi();
     requestAnimation();
   } catch {
-    if (disposed || generation !== analysisGeneration) {
+    if (generation !== analysisGeneration) {
       return;
     }
-    showError(
-      'Не удалось запустить воспроизведение. Проверьте разрешение браузера на звук и попробуйте ещё раз.',
-    );
-    elements.status.textContent = 'Не удалось запустить воспроизведение.';
+    showError(t.errPlay);
+    elements.status.textContent = t.statusPlayFail;
     updatePlaybackUi();
   }
 }
 
-function setPhase(nextPhase: AnalysisPhase, progress = 0, label = 'Распознаём ноты'): void {
+let phaseProgress = 0;
+let phaseLabel = '';
+
+function setPhase(nextPhase: AnalysisPhase, progress = 0, label = t.stageRecognize): void {
   phase = nextPhase;
+  phaseProgress = progress;
+  phaseLabel = label;
   elements.workspace.dataset.state = phase === AnalysisPhase.Loading || phase === AnalysisPhase.FastAnalyzing ? 'loading' : 'ready';
   elements.workspace.setAttribute(
     'aria-busy',
@@ -1188,27 +1460,27 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0, label = 'Распоз�
     ),
   );
   if (phase === AnalysisPhase.Idle) {
-    elements.dropTitle.textContent = 'Загрузите аудиофайл';
-    elements.dropDescription.textContent = 'Перетащите сюда или выберите с устройства';
-    elements.status.textContent = 'Можно выбрать аудиофайл.';
+    elements.dropTitle.textContent = t.dropH;
+    elements.dropDescription.textContent = t.dropMeta;
+    elements.status.textContent = t.statusIdle;
   } else if (phase === AnalysisPhase.Loading) {
-    elements.dropTitle.textContent = 'Открываем аудио…';
-    elements.dropDescription.textContent = 'Подготавливаем дорожку';
-    elements.status.textContent = 'Открываем аудио.';
+    elements.dropTitle.textContent = t.loadingH;
+    elements.dropDescription.textContent = t.loadingSub;
+    elements.status.textContent = t.statusLoading;
   } else if (phase === AnalysisPhase.FastAnalyzing) {
-    elements.dropTitle.textContent = 'Подготавливаем ноты…';
-    elements.dropDescription.textContent = 'Это займёт немного времени';
-    elements.status.textContent = 'Подготавливаем ноты.';
+    elements.dropTitle.textContent = t.analyzingH;
+    elements.dropDescription.textContent = t.analyzingSub;
+    elements.status.textContent = t.statusAnalyzing;
   } else if (phase === AnalysisPhase.PreviewReady) {
-    elements.analysisStatus.textContent = 'Первые ноты готовы';
+    elements.analysisStatus.textContent = t.analysisPreview;
     elements.analysisStatus.removeAttribute('title');
     elements.analysisStatus.removeAttribute('aria-label');
     elements.recognitionMode.hidden = true;
-    elements.status.textContent = 'Первые ноты готовы. Продолжаем подготовку.';
+    elements.status.textContent = t.statusPreview;
   } else if (phase === AnalysisPhase.FastReady) {
-    setReadyAnalysisStatus('Быстрый вариант готов');
+    elements.analysisStatus.textContent = '';
     elements.recognitionMode.hidden = !fullFastSpectrumReady;
-    elements.status.textContent = 'Быстрый вариант готов. Можно воспроизводить и перематывать.';
+    elements.status.textContent = t.statusFastReady;
   } else if (phase === AnalysisPhase.Refining) {
     const percentage = Math.round(progress * 100);
     elements.analysisStatus.textContent = `${label}: ${percentage}%`;
@@ -1217,14 +1489,14 @@ function setPhase(nextPhase: AnalysisPhase, progress = 0, label = 'Распоз�
     elements.recognitionMode.hidden = false;
     elements.status.textContent = `${label}: ${percentage}%.`;
   } else if (phase === AnalysisPhase.Complete) {
-    setReadyAnalysisStatus('Точный вариант готов');
+    elements.analysisStatus.textContent = '';
     elements.recognitionMode.hidden = false;
-    elements.status.textContent = 'Точный вариант готов. Партитура готова.';
+    elements.status.textContent = t.statusComplete;
   } else {
     renderer.setPreciseKeyHighlighting(false);
-    elements.dropTitle.textContent = 'Не удалось обработать файл';
-    elements.dropDescription.textContent = 'Попробуйте выбрать другой аудиофайл';
-    elements.status.textContent = 'Не удалось обработать файл.';
+    elements.dropTitle.textContent = t.failH;
+    elements.dropDescription.textContent = t.failSub;
+    elements.status.textContent = t.statusFail;
   }
   elements.analysisStatus.dataset.busy = String(
     phase === AnalysisPhase.PreviewReady || phase === AnalysisPhase.Refining,
@@ -1242,21 +1514,20 @@ function updatePlaybackUi(): void {
   if (playIconPlaying !== audioPlayer.isPlaying) {
     playIconPlaying = audioPlayer.isPlaying;
     elements.playButton.innerHTML = playIconPlaying ? ICONS.pause : ICONS.play;
-    const playCopy = playIconPlaying ? 'Пауза' : 'Воспроизвести';
+    const playCopy = playIconPlaying ? t.pause : t.play;
     elements.playButton.setAttribute('aria-label', playCopy);
-    elements.playButton.title = `${playCopy} (Пробел)`;
+    elements.playButton.title = `${playCopy} (${t.spaceKey})`;
   }
   elements.timeline.value = String(currentTime);
   elements.currentTime.textContent = formatTime(currentTime);
-  elements.durationTime.textContent = formatTime(audioPlayer.durationSeconds);
-  elements.railDuration.textContent = formatTime(audioPlayer.durationSeconds);
+  elements.durationTime.textContent = `/ ${formatTime(audioPlayer.durationSeconds)}`;
   waveformTimeline.setCurrentTime(currentTime);
   renderer.render(currentTime);
 }
 
 function updateFollowUi(following: boolean): void {
-  const label = following ? 'Следование' : 'К позиции';
-  const copy = following ? 'Следование включено' : 'Вернуться к позиции воспроизведения';
+  const label = following ? t.follow : t.toPosition;
+  const copy = following ? t.followOn : t.followOff;
   elements.followButton.innerHTML = `${ICONS.locateFixed}<span>${label}</span>`;
   elements.followButton.setAttribute('aria-label', copy);
   elements.followButton.title = copy;
@@ -1283,7 +1554,7 @@ function requestAnimation(): void {
 
 function animate(generation: number): void {
   animationFrameId = null;
-  if (disposed || generation !== analysisGeneration) {
+  if (generation !== analysisGeneration) {
     return;
   }
   updatePlaybackUi();
@@ -1318,7 +1589,6 @@ function clearError(): void {
 function isCancelled(error: unknown): boolean {
   return (
     (error instanceof AnalysisClientError && error.code === AnalysisErrorCode.Cancelled) ||
-    (error instanceof FastSpectrumClientError && error.code === AnalysisErrorCode.Cancelled) ||
     (error instanceof AudioPlayerError && error.code === AudioPlayerErrorCode.Cancelled)
   );
 }
@@ -1326,38 +1596,33 @@ function isCancelled(error: unknown): boolean {
 function toErrorMessage(error: unknown): string {
   if (error instanceof AudioPlayerError) {
     if (error.code === AudioPlayerErrorCode.FileTooLarge) {
-      return 'Файл больше 200 МБ. Выберите файл меньшего размера.';
+      return t.errTooLarge;
     }
     if (error.code === AudioPlayerErrorCode.DurationTooLong) {
-      return 'Длительность записи больше 10 минут. Выберите более короткий файл.';
+      return t.errTooLong;
     }
-    return 'Формат не поддерживается или аудиофайл повреждён.';
+    return t.errFormat;
   }
   if (error instanceof AnalysisClientError) {
     if (error.code === AnalysisErrorCode.ModelLoadFailed) {
-      return 'Не удалось подготовить точные ноты.';
+      return t.errModel;
     }
     if (error.code === AnalysisErrorCode.BackendUnavailable) {
-      return 'Браузер не смог продолжить распознавание.';
+      return t.errBackend;
     }
     if (error.code === AnalysisErrorCode.WorkerFailed) {
-      return 'Распознавание неожиданно остановилось.';
+      return t.errWorker;
     }
     if (error.code === AnalysisErrorCode.InvalidAudio) {
-      return 'Запись пуста или не подходит для распознавания.';
+      return t.errInvalid;
     }
-    return 'Распознавание не завершилось.';
+    return t.errAnalysis;
   }
-  return 'Произошла непредвиденная ошибка. Попробуйте ещё раз.';
-}
-
-function formatTime(seconds: number): string {
-  const safeSeconds = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(safeSeconds / 60)}:${String(safeSeconds % 60).padStart(2, '0')}`;
+  return t.errGeneric;
 }
 
 function formatContrast(value: number): string {
-  return `${value.toFixed(2).replace(/0$/, '').replace('.', ',')}×`;
+  return `${dec(value.toFixed(2).replace(/0$/, ''))}×`;
 }
 
 function formatSensitivity(value: number): string {
@@ -1375,19 +1640,7 @@ function updateRecognitionModeUi(): void {
   elements.preciseModeButton.classList.toggle('recognition-mode__option--selected', !isInstant);
   elements.instantModeButton.disabled = !canUseModes;
   elements.preciseModeButton.disabled = !canUseModes;
-  const preciseModelReadyText = 'Точный анализ уже использовался на этом устройстве — повторная загрузка обычно не нужна.';
-  elements.recognitionModeHint.textContent = preciseModelReadyOnDevice
-    ? ''
-    : 'Первый точный анализ скачает модель MuScriptor — около 110 МБ, дальше она берётся из кэша.';
-  elements.preciseModeButton.title = preciseModelReadyOnDevice
-    ? `Точнее. ${preciseModelReadyText}`
-    : 'Точнее';
-}
-
-function setReadyAnalysisStatus(label: string): void {
-  elements.analysisStatus.textContent = label;
-  elements.analysisStatus.removeAttribute('title');
-  elements.analysisStatus.setAttribute('aria-label', label);
+  elements.preciseModeButton.title = t.precise;
 }
 
 function isInteractiveElement(target: EventTarget | null): boolean {
@@ -1404,127 +1657,74 @@ function isInteractiveElement(target: EventTarget | null): boolean {
   return input !== null && input.type !== 'range';
 }
 
-function readPreciseModelReadyHint(): boolean {
+function storedNumber(key: string, min: number, max: number): number | null {
   try {
-    return localStorage['pianorolltranscribe.precise-model-ready'] === '1';
+    const value = Number(localStorage[key]);
+    return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function persistPreciseModelReadyHint(): void {
-  preciseModelReadyOnDevice = true;
+function persist(key: string, value: string): void {
   try {
-    localStorage['pianorolltranscribe.precise-model-ready'] = '1';
-  } catch {
-    return;
-  }
+    localStorage[`pianorolltranscribe.${key}`] = value;
+  } catch { /* private mode */ }
 }
 
 function restorePlaybackRate(): void {
-  let stored: unknown;
-  try {
-    stored = localStorage['pianorolltranscribe.playback-rate'];
-  } catch {
+  const rate = storedNumber('pianorolltranscribe.playback-rate', 0.2, 1);
+  if (rate === null) {
     return;
   }
-  if (typeof stored !== 'string') {
-    return;
-  }
-  const isSupported = Array.from(elements.playbackRate.options).some(
-    option => option.value === stored,
-  );
-  if (!isSupported) {
-    return;
-  }
-  elements.playbackRate.value = stored;
-  audioPlayer.setPlaybackRate(Number(stored));
+  elements.playbackRate.value = String(rate);
+  audioPlayer.setPlaybackRate(rate);
+  refreshSettingOutputs();
 }
 
 function persistPlaybackRate(): void {
-  try {
-    localStorage['pianorolltranscribe.playback-rate'] = elements.playbackRate.value;
-  } catch {
-    return;
-  }
+  persist('playback-rate', elements.playbackRate.value);
 }
 
 function restoreAnalysisSettings(): void {
-  let sensitivity: unknown;
-  let minNoteMs: unknown;
-  let maxNotes: unknown;
-  let contrast: unknown;
-  try {
-    sensitivity = localStorage['pianorolltranscribe.sensitivity'];
-    minNoteMs = localStorage['pianorolltranscribe.min-note-ms'];
-    maxNotes = localStorage['pianorolltranscribe.max-notes'];
-    contrast = localStorage['pianorolltranscribe.contrast'];
-  } catch {
-    return;
+  // Assign the input first, then read back so slider step-snapping applies.
+  const sensitivity = storedNumber('pianorolltranscribe.sensitivity', 0, 1);
+  if (sensitivity !== null) {
+    elements.sensitivity.value = String(sensitivity);
+    analysisSensitivity = Number(elements.sensitivity.value);
   }
-  if (typeof sensitivity === 'string') {
-    const value = Number(sensitivity);
-    if (Number.isFinite(value)) {
-      elements.sensitivity.value = String(Math.min(1, Math.max(0, value)));
-      analysisSensitivity = Number(elements.sensitivity.value);
-      const text = formatSensitivity(analysisSensitivity);
-      elements.sensitivityValue.value = text;
-      elements.sensitivityValue.textContent = text;
-      elements.sensitivity.setAttribute('aria-valuetext', `Чувствительность: ${text}`);
-    }
+  const minNoteMs = storedNumber('pianorolltranscribe.min-note-ms', 50, 500);
+  if (minNoteMs !== null) {
+    elements.minNoteMs.value = String(minNoteMs);
+    analysisMinNoteMs = Number(elements.minNoteMs.value);
   }
-  if (typeof minNoteMs === 'string') {
-    const value = Number(minNoteMs);
-    if (Number.isFinite(value)) {
-      elements.minNoteMs.value = String(Math.min(500, Math.max(50, value)));
-      analysisMinNoteMs = Number(elements.minNoteMs.value);
-      const text = `${analysisMinNoteMs} мс`;
-      elements.minNoteMsValue.value = text;
-      elements.minNoteMsValue.textContent = text;
-      elements.minNoteMs.setAttribute('aria-valuetext', `Минимальная длительность: ${text}`);
-    }
+  const maxNotes = storedNumber('pianorolltranscribe.max-notes', 1, 8);
+  if (maxNotes !== null) {
+    elements.maxNotes.value = String(Math.round(maxNotes));
+    analysisMaxNotesPerFrame = Number(elements.maxNotes.value);
   }
-  if (typeof maxNotes === 'string') {
-    const value = Number(maxNotes);
-    if (Number.isFinite(value)) {
-      elements.maxNotes.value = String(Math.min(8, Math.max(1, Math.round(value))));
-      analysisMaxNotesPerFrame = Number(elements.maxNotes.value);
-      const text = String(analysisMaxNotesPerFrame);
-      elements.maxNotesValue.value = text;
-      elements.maxNotesValue.textContent = text;
-      elements.maxNotes.setAttribute('aria-valuetext', `Максимум одновременно: ${text}`);
-    }
+  const contrast = storedNumber('pianorolltranscribe.contrast', 0.7, 2.2);
+  if (contrast !== null) {
+    elements.contrast.value = String(contrast);
+    renderer.setContrast(Number(elements.contrast.value));
   }
-  if (typeof contrast === 'string') {
-    const value = Number(contrast);
-    if (Number.isFinite(value)) {
-      elements.contrast.value = String(Math.min(2.2, Math.max(0.7, value)));
-      const applied = Number(elements.contrast.value);
-      renderer.setContrast(applied);
-      const text = formatContrast(applied);
-      elements.contrastValue.value = text;
-      elements.contrastValue.textContent = text;
-      elements.contrast.setAttribute('aria-valuetext', `Контраст: ${text}`);
-    }
-  }
+  refreshSettingOutputs();
 }
 
 function persistAnalysisSettings(): void {
-  try {
-    localStorage['pianorolltranscribe.sensitivity'] = String(analysisSensitivity);
-    localStorage['pianorolltranscribe.min-note-ms'] = String(analysisMinNoteMs);
-    localStorage['pianorolltranscribe.max-notes'] = String(analysisMaxNotesPerFrame);
-  } catch {
-    return;
-  }
+  persist('sensitivity', String(analysisSensitivity));
+  persist('min-note-ms', String(analysisMinNoteMs));
+  persist('max-notes', String(analysisMaxNotesPerFrame));
 }
 
 function persistContrastSetting(): void {
-  try {
-    localStorage['pianorolltranscribe.contrast'] = elements.contrast.value;
-  } catch {
-    return;
-  }
+  persist('contrast', elements.contrast.value);
+}
+
+function seekBy(deltaSeconds: number): void {
+  audioPlayer.seek(audioPlayer.currentTimeSeconds + deltaSeconds);
+  updatePlaybackUi();
+  requestAnimation();
 }
 
 function requiredElement<ElementType extends HTMLElement>(id: string): ElementType {
@@ -1534,3 +1734,6 @@ function requiredElement<ElementType extends HTMLElement>(id: string): ElementTy
   }
   return element as ElementType;
 }
+
+applyTheme();
+applyLanguage();

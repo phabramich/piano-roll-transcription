@@ -10,7 +10,6 @@ export class WaveformTimeline {
   private peaks = new Float32Array();
   private durationSeconds = 0;
   private currentTimeSeconds = 0;
-  private disposed = false;
 
   public constructor(private readonly canvas: HTMLCanvasElement) {
     const context = canvas.getContext('2d');
@@ -24,10 +23,6 @@ export class WaveformTimeline {
   }
 
   public setSamples(samples: Float32Array, durationSeconds: number): void {
-    if (this.disposed) {
-      return;
-    }
-
     this.durationSeconds = Math.max(0, durationSeconds);
     this.currentTimeSeconds = 0;
     const columnCount = Math.min(MAX_PEAK_COLUMNS, samples.length);
@@ -48,40 +43,18 @@ export class WaveformTimeline {
   }
 
   public setCurrentTime(seconds: number): void {
-    if (this.disposed) {
-      return;
-    }
-
     this.currentTimeSeconds = Math.min(this.durationSeconds, Math.max(0, seconds));
     this.draw();
   }
 
   public clear(): void {
-    if (this.disposed) {
-      return;
-    }
-
     this.peaks = new Float32Array();
     this.durationSeconds = 0;
     this.currentTimeSeconds = 0;
     this.draw();
   }
 
-  public dispose(): void {
-    if (this.disposed) {
-      return;
-    }
-
-    this.disposed = true;
-    this.resizeObserver.disconnect();
-    this.peaks = new Float32Array();
-  }
-
   private resize(): void {
-    if (this.disposed) {
-      return;
-    }
-
     const pixelRatio = window.devicePixelRatio || 1;
     const width = Math.round(this.canvas.clientWidth * pixelRatio);
     const height = Math.round(this.canvas.clientHeight * pixelRatio);

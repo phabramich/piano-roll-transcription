@@ -3,10 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f7f4f8" />
-    <meta name="description" content="Локальная расшифровка аудио: ноты из записи появляются на падающей ленте над клавиатурой — прямо в браузере, без отправки файла." />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236d3cf7'/%3E%3Cpath d='M17 41h30M21 41V28m8 13V24m8 17V30m6-14v15' fill='none' stroke='white' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='41' cy='16' r='5' fill='%2300abb8'/%3E%3C/svg%3E" />
-    <title>pianorolltranscribe</title>
+    <meta name="theme-color" content="#f7f8f7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14323d" media="(prefers-color-scheme: dark)" />
+    <meta name="description" content="Local audio transcription: upload a recording and get notes on a piano roll — right in the browser, nothing is uploaded." />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 13 28'%3E%3Crect x='0.5' y='0.5' width='12' height='27' rx='3.5' fill='%23ffb03c'/%3E%3Cg fill='%23fff'%3E%3Ccircle cx='4.1' cy='5.5' r='1.7'/%3E%3Ccircle cx='8.9' cy='10.1' r='1.7'/%3E%3Ccircle cx='4.1' cy='14.7' r='1.7'/%3E%3Ccircle cx='8.9' cy='19.3' r='1.7'/%3E%3C/g%3E%3C/svg%3E" />
+    <title>pianotape</title>
+    <script>
+      // Apply the persisted/system theme before first paint to avoid a flash.
+      try {
+        var t = localStorage['pianotape.theme'];
+        document.documentElement.dataset.theme =
+          t === 'light' || t === 'dark'
+            ? t
+            : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'light';
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

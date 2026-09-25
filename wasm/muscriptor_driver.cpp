@@ -58,7 +58,12 @@ bool loadModel(const std::string & path, int threads) {
     if (threads <= 0) {
         threads = 4;
     }
+#ifdef MUSCRIPTOR_WEBGPU
+    /* В audio.cpp нет имени "webgpu". "best" берёт GPU, если слинкован ggml-webgpu. */
+    const audiocpp_backend_config backend = { "best", 0, threads };
+#else
     const audiocpp_backend_config backend = { "cpu", 0, threads };
+#endif
     /* The model's default graph arenas (~1.9 GB total) are lazy virtual
      * reservations on native builds but real linear-memory allocations on
      * wasm. Shrink them so the whole heap fits a wasm32 address space. */

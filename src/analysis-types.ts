@@ -30,12 +30,6 @@ export enum AnalysisErrorCode {
   WorkerFailed = 'worker-failed',
 }
 
-export interface AppState {
-  analysisPhase: AnalysisPhase;
-  analysisProgress: number;
-  analysisError: AnalysisErrorCode | null;
-}
-
 export interface AnalyzedNote {
   pitchMidi: number;
   amplitude: number;
@@ -55,10 +49,23 @@ export interface AnalysisResult {
   midiBytes?: Uint8Array;
 }
 
-export interface AnalyzeWorkerRequest {
+/**
+ * Fast-spectrum runtime tuning knobs — every field optional; omitted values
+ * reproduce the constant-driven behaviour the pipeline was tuned on.
+ * sensitivity 0.5 is the neutral point (0 stricter, 1 more permissive);
+ * minNoteMs is the minimum note duration; maxNotesPerFrame caps polyphony.
+ */
+export interface FastSpectrumOptions {
+  sensitivity?: number;
+  minNoteMs?: number;
+  maxNotesPerFrame?: number;
+}
+
+export interface AnalysisWorkerRequest {
   type: WorkerMessageType.Analyze;
   jobId: number;
   samples: Float32Array;
+  options?: FastSpectrumOptions;
 }
 
 export interface AnalysisProgressWorkerMessage {
@@ -69,6 +76,8 @@ export interface AnalysisProgressWorkerMessage {
   notes?: AnalyzedNote[];
   /** Seconds of audio fully decoded by the precise engine so far. */
   refinedSeconds?: number;
+  /** A complete interim result — the fast worker's 30-second preview. */
+  preview?: AnalysisResult;
 }
 
 export interface AnalysisResultWorkerMessage {
@@ -84,8 +93,6 @@ export interface AnalysisErrorWorkerMessage {
   detail?: string;
 }
 
-export type AnalysisWorkerRequest = AnalyzeWorkerRequest;
-
 export type AnalysisWorkerResponse =
   | AnalysisProgressWorkerMessage
   | AnalysisResultWorkerMessage
@@ -98,4 +105,5 @@ export interface AnalysisCallbacks {
     stage?: 'model' | 'prepare' | 'transcribe',
     refinedSeconds?: number,
   ) => void;
+  onPreview?: (result: AnalysisResult) => void;
 }

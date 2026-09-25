@@ -6,20 +6,13 @@ export class PianoAudition {
   private context: AudioContext | null = null;
   private oscillator: OscillatorNode | null = null;
   private gain: GainNode | null = null;
-  private disposed = false;
 
   public prepare(): void {
-    if (this.disposed) {
-      return;
-    }
     const context = this.getContext();
     void context.resume().catch(() => undefined);
   }
 
   public start(midi: number): void {
-    if (this.disposed) {
-      return;
-    }
     const context = this.getContext();
     this.stop();
 
@@ -59,17 +52,6 @@ export class PianoAudition {
     oscillator.stop(now + RELEASE_SECONDS);
     this.oscillator = null;
     this.gain = null;
-  }
-
-  public dispose(): void {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    this.stop();
-    if (this.context !== null) {
-      void this.context.close().catch(() => undefined);
-    }
   }
 
   private getContext(): AudioContext {

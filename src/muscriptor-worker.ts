@@ -93,10 +93,6 @@ function postMessageToClient(
   self.postMessage(message, transfer);
 }
 
-function isValError(value: unknown): value is Error {
-  return value instanceof Error;
-}
-
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -166,17 +162,8 @@ async function fetchModelBytes(jobId: number): Promise<Uint8Array> {
 }
 
 async function createModuleInstance(): Promise<MuscriptorModule> {
-  const deviceMemory = (navigator as { deviceMemory?: number }).deviceMemory;
-  if (
-    typeof SharedArrayBuffer === 'undefined' ||
-    !globalThis.crossOriginIsolated ||
-    // A 2 GB wasm heap is a desktop-class workload — a failed allocation on a
-    // phone often kills the tab instead of throwing, so gate it out here.
-    /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ||
-    // iPadOS reports a desktop "Macintosh" UA — detect it via touch points.
-    (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)) ||
-    (deviceMemory !== undefined && deviceMemory < 8)
-  ) {
+  // ponytail: куча ~3 ГБ, на телефоне вкладка может умереть без ошибки.
+  if (typeof SharedArrayBuffer === 'undefined' || !globalThis.crossOriginIsolated) {
     throw new MuscriptorWorkerError(AnalysisErrorCode.BackendUnavailable);
   }
 
@@ -555,7 +542,7 @@ async function analyze(request: {
 
   try {
     const beginError = module.streamBegin(MODEL_SAMPLE_RATE, 1);
-    if (isValError(beginError)) {
+    if (beginError instanceof Error) {
       throw beginError;
     }
 
@@ -599,7 +586,7 @@ async function analyze(request: {
         MODEL_SAMPLE_RATE,
         start / MODEL_SAMPLE_RATE,
       );
-      if (isValError(pushed)) {
+      if (pushed instanceof Error) {
         throw pushed;
       }
       const before = notes.length;

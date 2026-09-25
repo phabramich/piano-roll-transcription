@@ -1,5 +1,6 @@
 import type { AnalyzedNote, AnalysisResult } from './analysis-types';
 import { DESIGN_COLORS, instrumentColor } from './design-colors';
+import { clamp, formatTime, lowerBoundBy } from './util';
 
 const FIRST_MIDI_NOTE = 21;
 const LAST_MIDI_NOTE = 108;
@@ -70,8 +71,8 @@ export class PianoRollRenderer {
   private timeOffsetSeconds = 0;
   private follow = true;
   private preciseKeyHighlighting = false;
+  private auditionMidi: number | null = null;
   private pinchState: PinchState | null = null;
-  private disposed = false;
 
   public onSeek: ((seconds: number) => void) | null = null;
   public onFollowChange: ((following: boolean) => void) | null = null;
@@ -100,34 +101,21 @@ export class PianoRollRenderer {
     this.render(0);
   }
 
-  public setAnalysis(result: AnalysisResult, durationSeconds: number): void {
-    if (this.disposed) {
-      return;
-    }
-    this.result = result;
-    this.noteIndex = createNoteIndex(result.notes);
-    this.durationSeconds = Math.max(0, durationSeconds);
-    this.centerPitchRange(result.notes);
-    this.render(this.currentTimeSeconds);
-  }
-
-  public setAnalysisPreservingViewport(
+  public setAnalysis(
     result: AnalysisResult,
     durationSeconds: number,
+    preserveViewport = false,
   ): void {
-    if (this.disposed) {
-      return;
-    }
     this.result = result;
     this.noteIndex = createNoteIndex(result.notes);
     this.durationSeconds = Math.max(0, durationSeconds);
+    if (!preserveViewport) {
+      this.centerPitchRange(result.notes);
+    }
     this.render(this.currentTimeSeconds);
   }
 
   public clear(): void {
-    if (this.disposed) {
-      return;
-    }
     this.result = null;
     this.noteIndex = [];
     this.durationSeconds = 0;
@@ -136,7 +124,7 @@ export class PianoRollRenderer {
   }
 
   public setContrast(value: number): void {
-    if (this.disposed || !Number.isFinite(value)) {
+    if (!Number.isFinite(value)) {
       return;
     }
     this.contrast = clamp(value, MIN_CONTRAST, MAX_CONTRAST);
@@ -144,7 +132,7 @@ export class PianoRollRenderer {
   }
 
   public setPreciseKeyHighlighting(enabled: boolean): void {
-    if (this.disposed || this.preciseKeyHighlighting === enabled) {
+    if (this.preciseKeyHighlighting === enabled) {
       return;
     }
     this.preciseKeyHighlighting = enabled;
@@ -152,7 +140,7 @@ export class PianoRollRenderer {
   }
 
   public zoomTime(direction: number): void {
-    if (this.disposed || direction === 0) {
+    if (direction === 0) {
       return;
     }
     this.setFollowing(false, false);
@@ -165,9 +153,6 @@ export class PianoRollRenderer {
   }
 
   public cyclePitchRange(): void {
-    if (this.disposed) {
-      return;
-    }
     this.setFollowing(false, false);
     const center = this.lowMidi + this.visiblePitchCount / 2;
     this.pitchRangeIndex = (this.pitchRangeIndex + 1) % PITCH_RANGES.length;
@@ -180,16 +165,10 @@ export class PianoRollRenderer {
   }
 
   public toggleFollow(): void {
-    if (this.disposed) {
-      return;
-    }
     this.setFollowing(!this.follow);
   }
 
   public resetViewport(): void {
-    if (this.disposed) {
-      return;
-    }
     this.visibleSeconds = DEFAULT_VISIBLE_SECONDS;
     this.pitchRangeIndex = DEFAULT_PITCH_RANGE_INDEX;
     this.lowMidi = DEFAULT_LOW_MIDI;
@@ -202,9 +181,6 @@ export class PianoRollRenderer {
   }
 
   public render(currentTimeSeconds: number): void {
-    if (this.disposed) {
-      return;
-    }
     const previousAnchorTimeSeconds = this.anchorTimeSeconds;
     this.currentTimeSeconds = Number.isFinite(currentTimeSeconds)
       ? clamp(currentTimeSeconds, 0, this.durationSeconds)
@@ -232,28 +208,9 @@ export class PianoRollRenderer {
       this.drawNoteOutlines(cssWidth, rollHeight);
       context.restore();
     }
+    this.drawAuditionLane(cssWidth, rollHeight);
     this.drawPlaybackPosition(cssWidth, rollHeight);
     this.drawKeyboard(cssWidth, rollHeight, keyboardHeight);
-  }
-
-  public dispose(): void {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    this.resizeObserver.disconnect();
-    this.canvas.removeEventListener('wheel', this.handleWheel);
-    this.canvas.removeEventListener('pointerdown', this.handlePointerDown);
-    this.canvas.removeEventListener('pointermove', this.handlePointerMove);
-    this.canvas.removeEventListener('pointerup', this.handlePointerEnd);
-    this.canvas.removeEventListener('pointercancel', this.handlePointerEnd);
-    this.canvas.removeEventListener(
-      'lostpointercapture',
-      this.handlePointerEnd,
-    );
-    window.removeEventListener('blur', this.handleWindowBlur);
-    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
-    this.cancelPointers();
   }
 
   private get visiblePitchCount(): number {
@@ -265,9 +222,6 @@ export class PianoRollRenderer {
   }
 
   private setFollowing(next: boolean, shouldRender = true): void {
-    if (this.disposed) {
-      return;
-    }
     const changed = this.follow !== next;
     this.follow = next;
     if (next) {
@@ -365,9 +319,9 @@ export class PianoRollRenderer {
     const windowEnd = windowStart + this.visibleSeconds;
     const firstFrame = Math.max(
       0,
-      lowerBound(result.frameTimestamps, windowStart) - 1,
+      lowerBoundBy(result.frameTimestamps.length, i => result.frameTimestamps[i] < windowStart) - 1,
     );
-    const lastFrame = lowerBound(result.frameTimestamps, windowEnd);
+    const lastFrame = lowerBoundBy(result.frameTimestamps.length, i => result.frameTimestamps[i] < windowEnd);
     const columnWidth = width / this.visiblePitchCount;
     this.context.fillStyle = DESIGN_COLORS.note;
     for (let frame = firstFrame; frame < lastFrame; frame += 1) {
@@ -475,8 +429,87 @@ export class PianoRollRenderer {
       context.fillRect(x, top, columnWidth * 0.76, keyboardHeight * 0.62);
     }
     this.drawActiveKeys(width, top, keyboardHeight, true);
+    this.drawAuditionKey(width, top, keyboardHeight);
     context.strokeStyle = DESIGN_COLORS.text;
     context.strokeRect(0, top, width, keyboardHeight);
+  }
+
+  private drawAuditionLane(width: number, rollHeight: number): void {
+    const midi = this.auditionMidi;
+    if (midi === null || rollHeight <= 0 || !this.isPitchVisible(midi)) {
+      return;
+    }
+    const columnWidth = width / this.visiblePitchCount;
+    const context = this.context;
+    context.save();
+    context.beginPath();
+    context.rect(0, 0, width, rollHeight);
+    context.clip();
+    context.fillStyle = DESIGN_COLORS.keyActive;
+    context.globalAlpha = 0.16;
+    context.fillRect(
+      this.pitchToX(midi, width),
+      0,
+      Math.max(1, columnWidth),
+      rollHeight,
+    );
+    context.globalAlpha = 0.55;
+    context.strokeStyle = DESIGN_COLORS.keyActive;
+    context.lineWidth = 1;
+    const x = Math.round(this.pitchToX(midi, width)) + 0.5;
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.lineTo(x, rollHeight);
+    const right = Math.round(this.pitchToX(midi, width) + columnWidth) - 0.5;
+    context.moveTo(right, 0);
+    context.lineTo(right, rollHeight);
+    context.stroke();
+    context.restore();
+  }
+
+  private drawAuditionKey(
+    width: number,
+    top: number,
+    keyboardHeight: number,
+  ): void {
+    const midi = this.auditionMidi;
+    if (midi === null || !this.isPitchVisible(midi)) {
+      return;
+    }
+    const columnWidth = width / this.visiblePitchCount;
+    const context = this.context;
+    context.save();
+    context.fillStyle = DESIGN_COLORS.keyActive;
+    context.globalAlpha = 0.9;
+    if (isBlackKey(midi)) {
+      const x = this.pitchToX(midi, width);
+      context.fillRect(
+        x + columnWidth * 0.12,
+        top + 1,
+        columnWidth * 0.76,
+        keyboardHeight * 0.62 - 2,
+      );
+    } else {
+      const highMidi = this.lowMidi + this.visiblePitchCount;
+      const leftMidi = Math.max(midi, this.lowMidi);
+      const rightMidi = Math.min(nextWhiteMidi(midi), highMidi);
+      const x = this.pitchToX(leftMidi, width);
+      const keyWidth = this.pitchToX(rightMidi, width) - x;
+      context.fillRect(x + 1, top + 1, Math.max(1, keyWidth - 2), keyboardHeight - 2);
+    }
+    context.restore();
+  }
+
+  private startAudition(midi: number): void {
+    this.auditionMidi = midi;
+    this.onPianoKeyStart?.(midi);
+    this.render(this.currentTimeSeconds);
+  }
+
+  private stopAudition(): void {
+    this.auditionMidi = null;
+    this.onPianoKeyStop?.();
+    this.render(this.currentTimeSeconds);
   }
 
   private drawActiveKeys(
@@ -490,7 +523,7 @@ export class PianoRollRenderer {
       return;
     }
     const frame = clamp(
-      lowerBound(result.frameTimestamps, this.currentTimeSeconds) - 1,
+      lowerBoundBy(result.frameTimestamps.length, i => result.frameTimestamps[i] < this.currentTimeSeconds) - 1,
       0,
       result.frameCount - 1,
     );
@@ -568,7 +601,7 @@ export class PianoRollRenderer {
       rollHeight - lineHeight / 2,
     );
     const direction = y < 0 ? '↑' : y > rollHeight ? '↓' : '';
-    const label = `NOW ${formatPlaybackTime(this.currentTimeSeconds)}${direction}`;
+    const label = `NOW ${formatTime(this.currentTimeSeconds)}${direction}`;
     const context = this.context;
     context.save();
     context.beginPath();
@@ -645,7 +678,7 @@ export class PianoRollRenderer {
         return;
       }
       state.auditioning = true;
-      this.onPianoKeyStart?.(state.midi);
+      this.startAudition(state.midi);
     }, HOLD_DELAY_MS);
     this.pointers.set(event.pointerId, state);
     if (this.pointers.size === 2) {
@@ -671,7 +704,7 @@ export class PianoRollRenderer {
       window.clearTimeout(state.holdTimeoutId);
       if (state.auditioning) {
         state.auditioning = false;
-        this.onPianoKeyStop?.();
+        this.stopAudition();
       }
     }
     if (this.pointers.size >= 2) {
@@ -701,7 +734,7 @@ export class PianoRollRenderer {
     }
     window.clearTimeout(state.holdTimeoutId);
     if (state.auditioning) {
-      this.onPianoKeyStop?.();
+      this.stopAudition();
     }
     const wasPinching = this.pinchState !== null;
     this.pointers.delete(event.pointerId);
@@ -744,7 +777,7 @@ export class PianoRollRenderer {
     if (first.auditioning || second.auditioning) {
       first.auditioning = false;
       second.auditioning = false;
-      this.onPianoKeyStop?.();
+      this.stopAudition();
     }
     this.setFollowing(false, false);
     this.pinchState = {
@@ -886,7 +919,7 @@ export class PianoRollRenderer {
     this.pointers.clear();
     this.pinchState = null;
     if (shouldStop) {
-      this.onPianoKeyStop?.();
+      this.stopAudition();
     }
   }
 
@@ -1045,13 +1078,6 @@ function normalizeWheelDelta(
   return delta;
 }
 
-function formatPlaybackTime(timeSeconds: number): string {
-  const totalSeconds = Math.max(0, Math.floor(timeSeconds));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
-
 function isBlackKey(midi: number): boolean {
   const pitchClass = midi % 12;
   return (
@@ -1080,10 +1106,6 @@ function smallestFittingPitchRangeIndex(usefulPitchCount: number): number {
   return PITCH_RANGES.length - 1;
 }
 
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
 function clampLowMidi(lowMidi: number, pitchCount: number): number {
   return clamp(
     lowMidi,
@@ -1103,20 +1125,6 @@ function nearestPitchRangeIndex(value: number): number {
     }
   }
   return closestIndex;
-}
-
-function lowerBound(values: Float32Array, target: number): number {
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (values[middle] < target) {
-      low = middle + 1;
-    } else {
-      high = middle;
-    }
-  }
-  return low;
 }
 
 function frameDuration(result: AnalysisResult, frame: number): number {

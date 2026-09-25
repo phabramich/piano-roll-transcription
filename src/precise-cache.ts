@@ -26,9 +26,8 @@ export interface CachedPrecise {
 export async function fingerprintFile(file: File): Promise<string | null> {
   try {
     const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-    const bytes = new Uint8Array(digest);
     let hex = '';
-    for (const byte of bytes) {
+    for (const byte of new Uint8Array(digest)) {
       hex += byte.toString(16).padStart(2, '0');
     }
     return hex;
@@ -56,21 +55,36 @@ export function getCachedPrecise(fileHash: string): CachedPrecise | null {
   }
 }
 
+function prefixedKeys(): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(KEY_PREFIX)) {
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
 export function cachePrecise(fileHash: string, payload: CachedPrecise): void {
   try {
-    const keys: string[] = [];
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (key?.startsWith(KEY_PREFIX)) {
-        keys.push(key);
-      }
-    }
+    const keys = prefixedKeys();
     while (keys.length >= MAX_ENTRIES) {
       localStorage.removeItem(keys.shift() as string);
     }
     localStorage.setItem(KEY_PREFIX + fileHash, JSON.stringify(payload));
   } catch {
     // Quota or privacy mode — cache is best-effort.
+  }
+}
+
+export function clearPreciseCache(): void {
+  try {
+    for (const key of prefixedKeys()) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // Privacy mode — nothing to clear.
   }
 }
 

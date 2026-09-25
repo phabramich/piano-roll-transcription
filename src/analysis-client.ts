@@ -2,8 +2,9 @@ import {
   AnalysisErrorCode,
   type AnalysisCallbacks,
   type AnalysisResult,
+  type AnalysisWorkerRequest,
   type AnalysisWorkerResponse,
-  type AnalyzeWorkerRequest,
+  type FastSpectrumOptions,
   WorkerMessageType,
 } from './analysis-types';
 
@@ -28,24 +29,14 @@ export class AnalysisClient {
   private worker: Worker | null = null;
   private activeJob: ActiveJob | null = null;
   private nextJobId = 1;
-  private disposed = false;
 
-  public constructor(
-    private readonly createWorkerInstance: () => Worker = () =>
-      new Worker(new URL('./analysis-worker.ts', import.meta.url), {
-        type: 'module',
-      }),
-  ) {}
+  public constructor(private readonly createWorkerInstance: () => Worker) {}
 
   public analyze(
     samples: Float32Array,
     callbacks: AnalysisCallbacks = {},
+    options?: FastSpectrumOptions,
   ): Promise<AnalysisResult> {
-    if (this.disposed) {
-      return Promise.reject(
-        new AnalysisClientError(AnalysisErrorCode.WorkerFailed),
-      );
-    }
     if (this.activeJob !== null) {
       this.cancel();
     }
@@ -57,27 +48,17 @@ export class AnalysisClient {
 
     return new Promise((resolve, reject) => {
       this.activeJob = { id: jobId, callbacks, resolve, reject };
-      const request: AnalyzeWorkerRequest = {
+      const request: AnalysisWorkerRequest = {
         type: WorkerMessageType.Analyze,
         jobId,
         samples,
+        options,
       };
       worker.postMessage(request, [samples.buffer]);
     });
   }
 
   public cancel(): void {
-    if (this.activeJob !== null) {
-      this.activeJob.reject(new AnalysisClientError(AnalysisErrorCode.Cancelled));
-      this.activeJob = null;
-    }
-
-    this.worker?.terminate();
-    this.worker = null;
-  }
-
-  public dispose(): void {
-    this.disposed = true;
     if (this.activeJob !== null) {
       this.activeJob.reject(new AnalysisClientError(AnalysisErrorCode.Cancelled));
       this.activeJob = null;
@@ -110,7 +91,11 @@ export class AnalysisClient {
     }
 
     if (message.type === WorkerMessageType.Progress) {
-      job.callbacks.onProgress?.(message.progress, message.notes, message.stage, message.refinedSeconds);
+      if (message.preview !== undefined) {
+        job.callbacks.onPreview?.(message.preview);
+      } else {
+        job.callbacks.onProgress?.(message.progress, message.notes, message.stage, message.refinedSeconds);
+      }
       return;
     }
 

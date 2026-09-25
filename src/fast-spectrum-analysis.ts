@@ -1,4 +1,5 @@
-import type { AnalysisResult, AnalyzedNote } from './analysis-types';
+import type { AnalysisResult, AnalyzedNote, FastSpectrumOptions } from './analysis-types';
+import { clamp } from './util';
 
 const FIRST_MIDI_NOTE = 21;
 const PITCH_COUNT = 88;
@@ -111,18 +112,6 @@ interface PartialLayout {
 }
 
 const PARTIAL_LAYOUT = createPartialLayout();
-
-/**
- * Runtime tuning knobs — every field optional; omitted values reproduce the
- * constant-driven behaviour the pipeline was tuned on. sensitivity 0.5 is
- * the neutral point (0 stricter, 1 more permissive); minNoteMs is the
- * minimum note duration; maxNotesPerFrame caps polyphony at 1..8.
- */
-export interface FastSpectrumOptions {
-  sensitivity?: number;
-  minNoteMs?: number;
-  maxNotesPerFrame?: number;
-}
 
 export class FastSpectrumAnalyzer {
   public readonly frameCount: number;
@@ -1165,10 +1154,6 @@ function maxValue(values: Float32Array): number {
     maximum = Math.max(maximum, values[index]);
   }
   return maximum;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
 }
 
 // Milliseconds → analysis frames: one hop is HOP_SIZE / SAMPLE_RATE
