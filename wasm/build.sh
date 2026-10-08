@@ -63,7 +63,10 @@ em++ $CXXFLAGS $INCLUDES -o "$BUILD/muscriptor_driver.o" -c "$APP/wasm/muscripto
 # 3. Link the ES-module bundle. Fixed 3 GB shared memory (ALLOW_MEMORY_GROWTH
 #    with pthreads is slow; measured decode peak is ~2.1 GB, flat vs duration,
 #    so 3 GB covers it with headroom — 2 GB OOMed inside stream_finish).
-#    PTHREAD_POOL_SIZE must exceed the ggml worker count.
+#    PTHREAD_POOL_SIZE must cover the persistent pools: speech_fft
+#    (hardware_concurrency) + ggml threadpool (threads-1) + headroom —
+#    mid-call pthread spawns can stall under Emscripten because exited
+#    workers only return to the pool when the JS event loop pumps.
 mkdir -p "$OUT"
 # shellcheck disable=SC2086
 em++ -pthread $EXC -msimd128 -O3 -DNDEBUG \
@@ -73,7 +76,7 @@ em++ -pthread $EXC -msimd128 -O3 -DNDEBUG \
   -sENVIRONMENT=web,worker \
   -sINITIAL_MEMORY=3221225472 \
   -sSTACK_SIZE=1048576 \
-  -sPTHREAD_POOL_SIZE=16 \
+  -sPTHREAD_POOL_SIZE=24 \
   -sEXIT_RUNTIME=0 \
   -sFILESYSTEM=1 \
   "-sEXPORTED_RUNTIME_METHODS=['FS','HEAPU8']" \

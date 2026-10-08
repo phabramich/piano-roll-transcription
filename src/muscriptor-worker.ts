@@ -191,9 +191,12 @@ async function loadModelInto(
   void caches.delete('muscriptor-gguf-v1').catch(() => undefined);
 
   module.FS.writeFile(MODEL_PATH_IN_FS, modelBytes);
+  // ponytail: 8 потоков достаточно — fft-пул (hardware_concurrency) + пул
+  // декодера (threads-1) должны влезать в PTHREAD_POOL_SIZE из wasm/build.sh.
+  // Больше потоков на wasm даёт заметно меньше, чем на нативе.
   const threads = Math.max(
     2,
-    Math.min(16, navigator.hardwareConcurrency || 4),
+    Math.min(8, navigator.hardwareConcurrency || 4),
   );
   try {
     if (!module.loadModel(MODEL_PATH_IN_FS, threads)) {

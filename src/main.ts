@@ -30,9 +30,8 @@ app.addEventListener('mousedown', event => {
 
 const STRINGS = {
   ru: {
-    dropH: 'Загрузите аудио для транскрибации',
-    dropMeta: 'MP3 · WAV · M4A · до 200 МБ · до 10 минут · файл не покидает устройство',
-    cta: 'Выбрать файл',
+    dropH: 'Транскрипция музыки',
+    dropMeta: 'Загрузить аудио · MP3 · WAV · M4A · до 200 МБ',
     loadingH: 'Открываем аудио…',
     loadingSub: 'Подготавливаем дорожку',
     analyzingH: 'Подготавливаем ноты…',
@@ -121,9 +120,8 @@ const STRINGS = {
     cacheCleared: 'Кэш очищен',
   },
   en: {
-    dropH: 'Upload audio for transcription',
-    dropMeta: 'MP3 · WAV · M4A · up to 200 MB · up to 10 min · file never leaves your device',
-    cta: 'Choose file',
+    dropH: 'Music transcription',
+    dropMeta: 'Upload audio · MP3 · WAV · M4A · up to 200 MB',
     loadingH: 'Opening audio…',
     loadingSub: 'Preparing the track',
     analyzingH: 'Preparing notes…',
@@ -251,7 +249,7 @@ function formatRate(value: number): string {
 
 /* mark = the punched tape strip itself — holes use --surface so they
    punch through to whatever card it sits on. */
-const MARK = `<svg viewBox="8.5 1 13 28" aria-hidden="true"><rect x="9" y="1.5" width="12" height="27" rx="3.5" fill="var(--accent)"/><g fill="var(--surface)"><circle cx="12.6" cy="7" r="1.7"/><circle cx="17.4" cy="11.6" r="1.7"/><circle cx="12.6" cy="16.2" r="1.7"/><circle cx="17.4" cy="20.8" r="1.7"/></g></svg>`;
+const MARK = `<svg viewBox="8.5 1 13 28" aria-hidden="true"><rect x="9" y="1.5" width="12" height="27" rx="3.5" fill="var(--playback)"/><g fill="var(--surface)"><circle cx="12.6" cy="7" r="1.7"/><circle cx="17.4" cy="11.6" r="1.7"/><circle cx="12.6" cy="16.2" r="1.7"/><circle cx="17.4" cy="20.8" r="1.7"/></g></svg>`;
 
 app.innerHTML = `
   <main class="application">
@@ -262,9 +260,8 @@ app.innerHTML = `
         <div class="drop-zone__copy">
           <span class="brand-line"><span class="app-mark" aria-hidden="true">${MARK}</span><span class="wordmark">pianotape</span></span>
           <strong id="drop-title">${t.dropH}</strong>
-          <span class="drop-zone__meta" id="drop-description">${t.dropMeta}</span>
+          <span class="drop-zone__meta">${ICONS.upload}<span id="drop-description">${t.dropMeta}</span></span>
         </div>
-        <span class="drop-zone__cta">${ICONS.upload}<span data-i18n="cta">${t.cta}</span></span>
         <span class="drop-zone__progress" aria-hidden="true"><i></i></span>
       </div>
       <div class="error-message" id="error-message" role="alert" hidden>
@@ -726,7 +723,7 @@ function setHintsOpen(open: boolean): void {
 }
 
 elements.hintsButton.addEventListener('click', () => {
-  setHintsOpen(elements.hintsPanel.hidden);
+  setHintsOpen(elements.hintsPanel.hidden !== false);
 });
 
 elements.canvas.addEventListener('keydown', event => {
@@ -815,7 +812,7 @@ elements.contrast.addEventListener('input', () => {
 });
 
 elements.settingsToggle.addEventListener('click', () => {
-  setSettingsOpen(elements.settingsPanel.hidden);
+  setSettingsOpen(elements.settingsPanel.hidden !== false);
 });
 
 // Outside pointer closes whichever popover is open.
@@ -869,7 +866,7 @@ elements.midiDownloadButton.addEventListener('click', () => {
   if (midiBytes === undefined) {
     return;
   }
-  const url = URL.createObjectURL(new Blob([midiBytes], { type: 'audio/midi' }));
+  const url = URL.createObjectURL(new Blob([new Uint8Array(midiBytes)], { type: 'audio/midi' }));
   const link = document.createElement('a');
   link.href = url;
   const baseName = elements.fileName.textContent ?? 'transcription';
