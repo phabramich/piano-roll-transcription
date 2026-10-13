@@ -17,10 +17,10 @@ WEBGPU="${WEBGPU:-0}"
 if [ "$WEBGPU" = "1" ]; then
   BUILD="$AUDIOCPP/build-wasm-webgpu"
   EXC="-fwasm-exceptions"
-  GPU_CMAKE="-DGGML_WEBGPU=ON -DGGML_WEBGPU_JSPI=ON"
+  GPU_CMAKE="-DGGML_WEBGPU=ON -DGGML_WEBGPU_JSPI=OFF"
   GPU_DEF="-DMUSCRIPTOR_WEBGPU"
   MODULE_NAME="muscriptor-webgpu"
-  GPU_LINK="--use-port=emdawnwebgpu -sJSPI -fwasm-exceptions"
+  GPU_LINK="--use-port=emdawnwebgpu -fwasm-exceptions"
   GPU_LIBS_EXTRA="$BUILD/ggml/src/ggml-webgpu/libggml-webgpu.a"
 else
   BUILD="$AUDIOCPP/build-wasm"

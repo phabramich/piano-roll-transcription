@@ -19,7 +19,8 @@ import {
  * of wasm memory for the GGUF plus decoder arenas.
  */
 
-const MODULE_JS_URL = '/models/muscriptor/muscriptor.js';
+const MODULE_CPU_URL = '/models/muscriptor/muscriptor.js';
+const MODULE_WEBGPU_URL = '/models/muscriptor/muscriptor-webgpu.js';
 const MODEL_GGUF_URL = '/models/muscriptor/muscriptor-small-q8_0.gguf';
 const MODEL_CACHE_NAME = 'muscriptor-gguf-v2';
 const MODEL_PATH_IN_FS = '/muscriptor-small-q8_0.gguf';
@@ -161,13 +162,14 @@ async function fetchModelBytes(jobId: number): Promise<Uint8Array> {
   return bytes;
 }
 
-async function createModuleInstance(): Promise<MuscriptorModule> {
+async function createModuleInstance(preferWebGPU: boolean): Promise<MuscriptorModule> {
   // ponytail: куча ~3 ГБ, на телефоне вкладка может умереть без ошибки.
   if (typeof SharedArrayBuffer === 'undefined' || !globalThis.crossOriginIsolated) {
     throw new MuscriptorWorkerError(AnalysisErrorCode.BackendUnavailable);
   }
 
-  const moduleUrl = new URL(MODULE_JS_URL, self.location.origin).href;
+  const tryWebGPU = preferWebGPU && typeof navigator.gpu === 'object' && navigator.gpu !== null;
+  const moduleUrl = new URL(tryWebGPU ? MODULE_WEBGPU_URL : MODULE_CPU_URL, self.location.origin).href;
   const { default: createModule } = (await import(
     /* @vite-ignore */ moduleUrl
   )) as { default: () => Promise<MuscriptorModule> };
@@ -202,6 +204,11 @@ async function loadModelInto(
     if (!module.loadModel(MODEL_PATH_IN_FS, threads)) {
       throw new MuscriptorWorkerError(AnalysisErrorCode.ModelLoadFailed);
     }
+  } catch (e) {
+    // WebGPU module may crash during loadModel on unsupported devices.
+    // Fallback to CPU by clearing the cached module promise and retrying.
+    modulePromise = null;
+    throw e;
   } finally {
     // Free the ~110 MB MEMFS copy whether loadModel succeeded or not — the
     // tensors are already in the heap on success, and on failure the file is
@@ -212,7 +219,7 @@ async function loadModelInto(
 
 async function getModule(jobId: number): Promise<MuscriptorModule> {
   if (modulePromise === null) {
-    modulePromise = createModuleInstance().catch(error => {
+    modulePromise = createModuleInstance(true).catch(error => {
       modulePromise = null;
       throw error;
     });
@@ -221,8 +228,19 @@ async function getModule(jobId: number): Promise<MuscriptorModule> {
   // reuses the same module instead of orphaning a 2 GB heap + pthread pool.
   const module = await modulePromise;
   if (!modelReady) {
-    await loadModelInto(module, jobId);
-    modelReady = true;
+    try {
+      await loadModelInto(module, jobId);
+      modelReady = true;
+    } catch (e) {
+      // WebGPU failed (likely ggml-webgpu crash), fall back to CPU.
+      module.unload();
+      modulePromise = null;
+      const cpuModule = await createModuleInstance(false);
+      await loadModelInto(cpuModule, jobId);
+      modelReady = true;
+      modulePromise = Promise.resolve(cpuModule);
+      return cpuModule;
+    }
   }
   return module;
 }
